@@ -1,0 +1,524 @@
+================================================================================
+  AFTER-SALES SERVICE WEBSITE — FULL CHANGES LOG
+  Connecting the Laravel Backend to the React Frontend
+  (Beginner-Friendly Explanation)
+================================================================================
+
+OVERVIEW
+--------
+The project has two separate parts:
+  - BACKEND  → A Laravel (PHP) server that stores and manages all the data
+               in a database. It runs at http://127.0.0.1:8000
+  - FRONTEND → A React (JavaScript) app that users see in their browser.
+               It was showing fake/hardcoded data instead of real data.
+
+The goal of all these changes was to make the frontend talk to the backend
+so that real data is shown, real accounts are created, and real actions
+(like submitting a ticket) are saved to the database.
+
+Think of the backend as a restaurant kitchen, and the frontend as the menu
+and waitstaff. Before these changes, the menu was showing "pretend food"
+that was never actually cooked. Now the waitstaff properly orders from
+the kitchen and serves real food.
+
+================================================================================
+CHANGE 1 — NEW FILE: frontend/src/services/api.js
+================================================================================
+
+WHY:
+  Every component (ClientDashboard, EmployeeDashboard, AdminDashboard) needs
+  to send requests to the backend. Without a central place for this, each
+  component would have to repeat the same code over and over (copy-paste),
+  which makes it hard to maintain and easy to break.
+
+  This file is like a "phone directory" — instead of every component looking
+  up the backend's number themselves, they all call this one file which knows
+  all the numbers.
+
+WHAT WAS DONE:
+  A new file was created at: frontend/src/services/api.js
+
+  It contains:
+  1. BASE URL — All API calls start with '/api', which Vite then forwards
+     to the real backend at http://127.0.0.1:8000 (see Change 2).
+
+  2. getToken() — Reads the login token from localStorage (the browser's
+     built-in storage). When a user logs in, the backend gives them a
+     secret token (like a wristband at an event). Every future request
+     must include this token to prove who they are.
+
+  3. authHeaders() — Builds the headers that go with every request.
+     Headers are extra info sent alongside a request, like:
+       - "Content-Type: application/json" → "I'm sending JSON data"
+       - "Authorization: Bearer TOKEN"    → "Here is my wristband"
+
+  4. apiRequest() — A reusable function to make any HTTP request
+     (GET, POST, PATCH, DELETE). It handles errors automatically.
+
+  5. apiUpload() — Same as above but for sending files (like images).
+     Files need a different format called "multipart/form-data".
+
+  6. Exported functions for every backend endpoint:
+     - login(), register(), logout(), getMe()
+     - getClientTickets(), createTicket()
+     - getEmployeeTickets(), assignTicket(), updateEmployeeTicket()
+     - getAdminDemandes(), getAdminStats(), createAdminUser()
+     - updateClient(), updateDemandeStatus(), deleteUser(), takeMoney()
+
+KEY CONCEPT — What is a token?
+  When you log in, the backend confirms your identity and gives back a
+  random string like "2|abc123xyz...". This is your token. You store it
+  in localStorage and attach it to all future requests. The backend reads
+  it and knows it's you without you having to log in again every time.
+
+================================================================================
+CHANGE 2 — MODIFIED: frontend/vite.config.js
+================================================================================
+
+WHY:
+  The React app runs at http://localhost:5173 (in development).
+  The Laravel backend runs at http://127.0.0.1:8000.
+  These are different "origins" (different ports = different origins).
+
+  When JavaScript in a browser tries to contact a different origin, browsers
+  block it by default — this is called the "Same-Origin Policy" (a security
+  feature). You'd get a CORS error.
+
+  A PROXY solves this: instead of the browser calling the backend directly,
+  it calls its own server (localhost:5173/api/...) which then silently
+  forwards the request to the backend (127.0.0.1:8000/api/...). The browser
+  never knows the difference, so no CORS error.
+
+WHAT WAS CHANGED:
+  BEFORE:
+    export default defineConfig({
+      plugins: [react()],
+    });
+
+  AFTER:
+    export default defineConfig({
+      plugins: [react()],
+      server: {
+        proxy: {
+          '/api': {
+            target: 'http://127.0.0.1:8000',
+            changeOrigin: true,
+          }
+        }
+      }
+    });
+
+  This tells Vite: "Any request that starts with /api should be forwarded
+  to http://127.0.0.1:8000". So when the frontend calls /api/login, Vite
+  sends it to http://127.0.0.1:8000/api/login behind the scenes.
+
+================================================================================
+CHANGE 3 — MODIFIED: frontend/src/app/App.jsx
+================================================================================
+
+WHY:
+  App.jsx was the main file that held all the fake (static) data. It had:
+  - A hardcoded list of fake users (initialUsers)
+  - A hardcoded list of fake tickets (initialTickets)
+  - A hardcoded activity log (initialActivityLog)
+
+  It was also passing this fake data down to every dashboard component.
+  The login function just searched through the fake user list instead of
+  calling the real backend.
+
+WHAT WAS CHANGED:
+  1. REMOVED all fake data arrays (~130 lines of hardcoded mock data).
+
+  2. ADDED: import * as api from '../services/api'
+     Now App.jsx can call the real backend through the api.js service.
+
+  3. ADDED: authLoading state
+     When the page first loads, the app checks localStorage to see if the
+     user was already logged in (from a previous session). While it's
+     checking, it shows a loading screen instead of incorrectly redirecting
+     to login. This prevents the "flash" where a logged-in user briefly
+     sees the login page.
+
+  4. REWROTE handleLogin(identifier, password, setError):
+     BEFORE → searched fake user list, compared passwords as plain text
+     AFTER  → calls api.login(), gets a real token from the backend,
+               stores token + user info in localStorage, goes to dashboard
+     If login fails, setError() is called to show an error message.
+
+  5. REWROTE handleRegister(userData, setError):
+     BEFORE → just added user to the local fake array
+     AFTER  → calls api.register(), saves the returned token and user info
+
+  6. REWROTE handleLogout():
+     BEFORE → just cleared local state
+     AFTER  → calls api.logout() to tell the backend to delete the token
+               (so it can't be reused), then clears localStorage
+
+  7. REMOVED props that were passing fake data to dashboards:
+     - tickets, activityLog, users (fake data)
+     - onCreateTicket, onUpdateTicket, onUpdateUser (fake handlers)
+     Each dashboard now fetches its OWN data directly.
+
+================================================================================
+CHANGE 4 — MODIFIED: frontend/src/app/components/ClientDashboard.jsx
+================================================================================
+
+WHY:
+  The client dashboard was receiving fake tickets as a prop from App.jsx
+  and showing those. It wasn't connected to the database at all, so any
+  ticket submitted would disappear on page refresh.
+
+WHAT WAS CHANGED:
+  1. REMOVED props: tickets, onCreateTicket
+     The component used to receive these from App.jsx. Now it manages
+     its own data.
+
+  2. ADDED: import { getClientTickets, createTicket } from '../../services/api'
+
+  3. ADDED: useState for tickets, loadingTickets, submitError
+     - tickets: the real list of tickets from the database
+     - loadingTickets: true while waiting for the server to respond
+     - submitError: error message to show if something goes wrong
+
+  4. ADDED: useEffect to fetch tickets on load
+     useEffect runs code when the component first appears on screen.
+     It calls getClientTickets() which hits the backend endpoint
+     GET /api/client/tickets. The backend automatically knows which client
+     is logged in (via their token) and returns only their tickets.
+
+  5. REWROTE handleSubmit:
+     BEFORE → created a fake ticket object and called onCreateTicket()
+     AFTER  → builds a FormData object (needed for file uploads), sends it
+               to the backend via createTicket(), then re-fetches the ticket
+               list to show the new ticket immediately.
+
+  6. FIXED field names to match the database:
+     - ticket.title     → ticket.titre       (French field name in DB)
+     - ticket.category  → ticket.nom_poste   (job/machine name)
+     - ticket.createdAt → ticket.created_at  (database format)
+
+================================================================================
+CHANGE 5 — MODIFIED: frontend/src/app/components/EmployeeDashboard.jsx
+================================================================================
+
+WHY:
+  Same situation as the client dashboard — it was using fake tickets and
+  not saving anything. Employees couldn't actually manage real work.
+
+WHAT WAS CHANGED:
+  1. REMOVED props: tickets, onUpdateTicket
+
+  2. ADDED: import { getEmployeeTickets, assignTicket, updateEmployeeTicket }
+     from '../../services/api'
+
+  3. ADDED: states for tickets (assigned to this employee), newDemandes
+     (unassigned tickets that any employee can pick up), loading
+
+  4. ADDED: fetchTickets() function that calls getEmployeeTickets() which
+     hits GET /api/employee/tickets. The backend returns two lists:
+     - demandes: tickets already assigned to this employee
+     - new_demandes: tickets with no employee assigned yet
+
+  5. REWROTE action handlers:
+     - handleAssignTicket(id) → calls assignTicket(id)
+       This tells the backend "I'm taking this ticket" — it sets
+       id_employee to the current employee's ID in the database.
+
+     - handleStartWork(id) → calls updateEmployeeTicket(id, {status:'in progress'})
+       Updates the ticket status so the client can see it's being worked on.
+
+     - handleResolve(id) → calls updateEmployeeTicket(id, {status:'resolved', employee_note})
+       Marks the ticket as done, saves the employee's note.
+
+     - handleEscalate(id) → calls updateEmployeeTicket(id, {status:'tech'})
+       Escalates to a tech specialist (status 'tech' means escalated).
+
+  6. FIXED field names:
+     - ticket.title      → ticket.titre
+     - ticket.clientName → ticket.client?.nom  (the '?' means "if client exists")
+     - clientId          → ticket.id_client
+
+  7. ADDED: eager loading on backend (see Change 9) so ticket.client works.
+
+================================================================================
+CHANGE 6 — MODIFIED: frontend/src/app/components/AdminDashboard.jsx
+================================================================================
+
+WHY:
+  The admin dashboard had the most fake data — fake user lists, fake stats,
+  fake charts, fake activity logs. None of it reflected real database data.
+
+WHAT WAS CHANGED:
+  1. REMOVED props: tickets, activityLog, users, onUpdateUser
+
+  2. ADDED imports for all admin API functions from services/api.js
+
+  3. ADDED: states for tickets, stats, loading
+     - stats.total → total number of tickets in the system
+     - stats.by_status → breakdown of tickets by status (open, resolved, etc.)
+
+  4. ADDED: fetchData() using Promise.all()
+     Promise.all() runs multiple requests at the same time (in parallel)
+     instead of one after another. This is faster.
+     It calls: getAdminDemandes() + getAdminStats() simultaneously.
+
+  5. REWROTE action handlers:
+     - handleSaveBalance → calls takeMoney(clientId, amount)
+       Deducts money from a client's account.
+
+     - handleUpdateDemandeStatus → calls updateDemandeStatus(id, {status})
+       Admin can manually change a ticket's status.
+
+     - handleToggleClientState → calls updateClient(id, {client_state})
+       Admin can activate/deactivate a client account.
+
+     - handleDeleteUser → calls deleteUser(userId) after confirm()
+       The confirm() shows a browser popup "Are you sure?" before deleting.
+
+  6. FIXED stats to use real data:
+     - totalTickets      → from stats.total
+     - resolvedTickets   → count tickets where status === 'resolved'
+     - escalatedTickets  → count tickets where status === 'tech'
+     - resolutionRate    → (resolved / total) * 100
+
+  7. REPLACED fake charts with real status breakdown from stats.by_status
+
+  8. REPLACED fake activity log with real recent tickets (tickets.slice(0, 5))
+
+  9. FIXED client field names:
+     - client.name       → client.nom
+     - client.email      → client.mail
+     - client.phone      → client.numero
+     - client.balance    → client.money
+     - client.taxId      → client.code_fiscal
+
+================================================================================
+CHANGE 7 — MODIFIED: frontend/src/app/components/Register.jsx
+================================================================================
+
+WHY:
+  The registration form had completely wrong fields that didn't match
+  what the backend's database expects. Submitting the form would fail
+  silently or create a broken record. Also, there was no way to show
+  the user what went wrong.
+
+WHAT WAS CHANGED:
+  1. REPLACED old form state:
+     BEFORE: { name, email, cin, unidescNumber, softwareType, phoneNumber }
+     AFTER:  { name, prenom, email, cin, code_fiscal, numero,
+               password, password_confirmation }
+
+     Field name meanings:
+     - name              → Last name (nom in database)
+     - prenom            → First name (French for "first name")
+     - cin               → 8-digit national ID number
+     - code_fiscal       → Company fiscal/tax code
+     - numero            → Phone number
+     - password          → Login password
+     - password_confirmation → Repeat password (to catch typos)
+
+  2. ADDED: const [error, setError] = useState('')
+     A state to hold any error message from the backend.
+
+  3. REWROTE handleSubmit:
+     - Clears any previous error
+     - Checks if password === password_confirmation (catches typos before
+       even sending to the server)
+     - Calls onRegister(formData, setError) — App.jsx handles the actual
+       API call and calls setError() if something goes wrong
+
+  4. REPLACED old HTML form fields with correct ones:
+     - Removed: "Anydesc Code" dropdown (softwareType select)
+     - Removed: "Fiscal Number" input (unidescNumber — wrong name)
+     - Removed: phoneNumber field
+     - Added: prenom (First Name) text input
+     - Added: code_fiscal text input (renamed from unidescNumber)
+     - Added: numero (Phone Number) with type="tel"
+     - Added: password input (type="password" hides text)
+     - Added: password_confirmation input
+     - All fields marked as required
+
+  5. ADDED: error display box at top of form
+     If the backend returns an error (e.g. "Email already taken"), it
+     shows in a red box at the top of the form.
+
+  6. ADDED: required to the terms checkbox
+     Before, you could submit without ticking "I agree to terms".
+     Now the browser won't submit until it's checked.
+
+================================================================================
+CHANGE 8 — MODIFIED: frontend/src/app/components/Login.jsx
+================================================================================
+
+WHY:
+  When login failed (wrong password, wrong CIN), nothing visual happened.
+  The error was silently swallowed. Users had no idea why they couldn't
+  log in. Also, there was a "Demo Accounts" section showing fake credentials
+  that no longer exist.
+
+WHAT WAS CHANGED:
+  1. ADDED: const [error, setError] = useState('')
+     Holds any error message to display.
+
+  2. REWROTE handleSubmit:
+     BEFORE:
+       const handleSubmit = (e) => {
+         e.preventDefault();
+         onLogin(identifier, password);
+       };
+
+     AFTER:
+       const handleSubmit = (e) => {
+         e.preventDefault();
+         setError('');                           // Clear old error
+         onLogin(identifier, password, setError); // Pass setError so
+       };                                         // App.jsx can set it
+                                                  // if login fails
+
+  3. ADDED: error display in the form
+     A red box appears below the password field if login fails:
+       {error && (
+         <div className="p-3 bg-red-50 border border-red-200 ...">
+           {error}
+         </div>
+       )}
+     The && means: "only show this if error is not empty".
+
+  4. REMOVED: the "Demo Accounts" section at the bottom
+     This showed fake credentials (admin@demo.com, etc.) that were only
+     used with the old mock data. Now that real accounts are required,
+     this section is misleading and was removed.
+
+================================================================================
+CHANGE 9 — MODIFIED: backend/app/Http/Controllers/Api/AdminUserController.php
+================================================================================
+
+WHY:
+  The admin's "get all tickets" endpoint (GET /api/admin/demandes) was
+  returning tickets WITHOUT the client information attached. So the admin
+  dashboard would show tickets but couldn't display the client's name
+  or details — it would just show "undefined" or be blank.
+
+  In databases, data is split across multiple tables (tickets in one table,
+  clients in another). When you need data from both, you "join" them.
+  In Laravel, this is called "eager loading" — you tell it to load the
+  related data along with the main data.
+
+WHAT WAS CHANGED:
+  BEFORE:
+    $demandes = Demande::orderBy('created_at', 'desc')->get();
+
+  AFTER:
+    $demandes = Demande::with(['client', 'employee'])
+                       ->orderBy('created_at', 'desc')
+                       ->get();
+
+  The with(['client', 'employee']) part tells Laravel: "For each ticket,
+  also load the client who submitted it AND the employee assigned to it."
+
+  This works because the Demande model has these relationship methods:
+    public function client()   { return $this->belongsTo(Client::class, 'id_client'); }
+    public function employee() { return $this->belongsTo(Employee::class, 'id_employee'); }
+
+  Without this, the JSON response would be:
+    { "id": 1, "titre": "My Issue", "id_client": 5 }
+
+  With eager loading, it becomes:
+    { "id": 1, "titre": "My Issue", "id_client": 5,
+      "client": { "id": 5, "nom": "Dupont", "mail": "..." } }
+
+================================================================================
+CHANGE 10 — MODIFIED: backend/app/Http/Controllers/Api/EmployeeController.php
+================================================================================
+
+WHY:
+  Same problem as Change 9, but for the employee's ticket list.
+  The employee dashboard shows the client's name next to each ticket,
+  but the backend wasn't including client data in the response.
+  Also, id_client wasn't included in the SELECT query, which is needed
+  to display the client ID and to make eager loading work properly.
+
+WHAT WAS CHANGED:
+  1. ADDED to both queries (assigned tickets AND new/unassigned tickets):
+     ->with('client')
+     This loads the client data alongside each ticket.
+
+  2. ADDED 'id_client' to the ->select([...]) list:
+     BEFORE: select(['id', 'titre', 'status', 'description', 'priority',
+                     'employee_note', 'created_at', 'image'])
+     AFTER:  select(['id', 'titre', 'status', 'description', 'priority',
+                     'employee_note', 'created_at', 'image', 'id_client'])
+
+     WHY does this matter? Laravel's eager loading needs the foreign key
+     column (id_client) to be selected in order to know which client to
+     load. If you select specific columns and forget the foreign key,
+     the related data won't load — it'll just be null.
+
+================================================================================
+HOW EVERYTHING FITS TOGETHER (Summary Flow)
+================================================================================
+
+1. User opens the app in their browser (React frontend)
+
+2. App.jsx checks localStorage:
+   → If a token is found: restore session, go to dashboard
+   → If no token: show Login page
+
+3. User logs in:
+   Login.jsx → App.jsx handleLogin → api.js login() →
+   POST /api/login → Laravel AuthController →
+   checks database → returns token →
+   token stored in localStorage → Dashboard shown
+
+4. Dashboard loads:
+   e.g. ClientDashboard useEffect → api.js getClientTickets() →
+   GET /api/client/tickets (with Bearer token in header) →
+   Laravel ClientController (verifies token, finds client) →
+   returns client's tickets from database →
+   React shows them on screen
+
+5. User submits a ticket:
+   Form submit → handleSubmit → api.js createTicket(formData) →
+   POST /api/client/tickets (with file if attached) →
+   Laravel stores in database → returns new ticket →
+   React re-fetches ticket list → new ticket appears
+
+6. Employee resolves a ticket:
+   Button click → handleResolve → api.js updateEmployeeTicket() →
+   PATCH /api/employee/tickets/123 {status: 'resolved'} →
+   Laravel updates ticket in database → ticket disappears from queue
+
+7. User logs out:
+   Button click → App.jsx handleLogout → api.js logout() →
+   POST /api/logout (backend deletes the token from database) →
+   localStorage cleared → Login page shown
+
+================================================================================
+IMPORTANT NOTES FOR RUNNING THE PROJECT
+================================================================================
+
+1. Start the backend first:
+   cd backend
+   php artisan serve
+   (This starts Laravel at http://127.0.0.1:8000)
+
+2. Then start the frontend:
+   cd frontend
+   npm run dev
+   (This starts React + Vite at http://localhost:5173)
+
+3. Make sure the database is set up:
+   cd backend
+   php artisan migrate
+   (Creates all the tables in the database)
+
+4. Create your first admin account via the database directly or
+   by running a seeder:
+   php artisan db:seed
+
+5. The frontend auto-proxies all /api calls to the backend,
+   so you never need to worry about CORS in development.
+
+================================================================================
+END OF CHANGES LOG
+================================================================================

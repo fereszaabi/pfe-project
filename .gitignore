@@ -1,0 +1,32 @@
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+vendor/
+
+# ── Laravel ───────────────────────────────────────────────────────────────────
+backend/.env
+backend/.env.backup
+backend/.env.production
+backend/storage/logs/*.log
+backend/storage/framework/cache/data/*
+backend/storage/framework/sessions/*
+backend/storage/framework/views/*
+backend/bootstrap/cache/*.php
+backend/public/hot
+backend/public/storage
+
+# ── Frontend build output ──────────────────────────────────────────────────────
+frontend/dist/
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.suo
+*.user
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.log
+*.cache

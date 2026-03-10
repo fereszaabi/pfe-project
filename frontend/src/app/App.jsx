@@ -1,0 +1,190 @@
+import { useState, useEffect } from 'react';
+import { Login } from './components/Login';
+import { Register } from './components/Register';
+import { ClientDashboard } from './components/ClientDashboard';
+import { ClientProfile } from './components/ClientProfile';
+import { EmployeeDashboard } from './components/EmployeeDashboard';
+import { Escalated } from './components/Escalated';
+import { AdminDashboard } from './components/AdminDashboard';
+import { TicketTracking } from './components/TicketTracking';
+import * as api from '../services/api';
+
+export default function App() {
+    const [view, setView] = useState('login');
+    const [activeView, setActiveView] = useState('dashboard');
+    const [selectedTicketId, setSelectedTicketId] = useState(null);
+    const [currentUser, setCurrentUser] = useState(null);
+    const [authLoading, setAuthLoading] = useState(true);
+
+    // Restore session from localStorage on first load
+    useEffect(() => {
+        const storedUser = localStorage.getItem('auth_user');
+        const storedToken = localStorage.getItem('auth_token');
+        if (storedUser && storedToken) {
+            setCurrentUser(JSON.parse(storedUser));
+            setView('dashboard');
+        }
+        setAuthLoading(false);
+        window.history.replaceState({ view: storedUser ? 'dashboard' : 'login', activeView: 'dashboard' }, '');
+    }, []);
+
+    useEffect(() => {
+        const onPopState = (e) => {
+            if (!e.state) return;
+            const { view: v, activeView: av, ticketId } = e.state;
+            setView(v);
+            setActiveView(av || 'dashboard');
+            if (ticketId !== undefined) setSelectedTicketId(ticketId);
+            if (v === 'login') {
+                setCurrentUser(null);
+                localStorage.removeItem('auth_user');
+                localStorage.removeItem('auth_token');
+            }
+        };
+        window.addEventListener('popstate', onPopState);
+        return () => window.removeEventListener('popstate', onPopState);
+    }, []);
+
+    const navigate = (newView, extra = {}) => {
+        const state = { view: newView, activeView: newView, ...extra };
+        window.history.pushState(state, '');
+        setView(newView);
+        setActiveView(newView);
+    };
+
+    const handleNavigate = (newView) => navigate(newView);
+
+    const handleLogin = async (identifier, password, setError) => {
+        try {
+            const data = await api.login(identifier, password);
+            localStorage.setItem('auth_token', data.token);
+            localStorage.setItem('auth_user', JSON.stringify(data.user));
+            setCurrentUser(data.user);
+            navigate('dashboard');
+        } catch (err) {
+            const messages = err?.errors
+                ? Object.values(err.errors).flat().join(' ')
+                : err?.message || 'Invalid credentials. Please try again.';
+            setError(messages);
+        }
+    };
+
+    const handleRegister = async (userData, setError) => {
+        try {
+            const data = await api.register(userData);
+            localStorage.setItem('auth_token', data.token);
+            localStorage.setItem('auth_user', JSON.stringify(data.user));
+            setCurrentUser(data.user);
+            navigate('dashboard');
+        } catch (err) {
+            const messages = err?.errors
+                ? Object.values(err.errors).flat().join(' ')
+                : err?.message || 'Registration failed. Please try again.';
+            setError(messages);
+        }
+    };
+
+    const handleLogout = async () => {
+        try { await api.logout(); } catch (_) { /* ignore */ }
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('auth_user');
+        setCurrentUser(null);
+        window.history.replaceState({ view: 'login', activeView: 'dashboard' }, '');
+        setView('login');
+        setActiveView('dashboard');
+    };
+
+    if (authLoading) return null;
+
+    if (view === 'login') {
+        return (
+            <Login
+                onLogin={handleLogin}
+                onSwitchToRegister={() => setView('register')}
+            />
+        );
+    }
+
+    if (view === 'register') {
+        return (
+            <Register
+                onRegister={handleRegister}
+                onSwitchToLogin={() => setView('login')}
+            />
+        );
+    }
+
+    if (view === 'dashboard' && currentUser) {
+        if (currentUser.role === 'client') {
+            return (
+                <ClientDashboard
+                    user={currentUser}
+                    activeView={activeView}
+                    onViewTicket={(ticketId) => {
+                        setSelectedTicketId(ticketId);
+                        navigate('tracking', { ticketId });
+                    }}
+                    onLogout={handleLogout}
+                    onNavigate={handleNavigate}
+                />
+            );
+        }
+
+        if (currentUser.role === 'employee') {
+            return (
+                <EmployeeDashboard
+                    user={currentUser}
+                    activeView={activeView}
+                    onLogout={handleLogout}
+                    onNavigate={handleNavigate}
+                />
+            );
+        }
+    }
+
+    if (view === 'escalated' && currentUser?.role === 'employee') {
+        return (
+            <Escalated
+                user={currentUser}
+                activeView={activeView}
+                onLogout={handleLogout}
+                onNavigate={handleNavigate}
+            />
+        );
+    }
+
+    if (view === 'dashboard' && currentUser) {
+        if (currentUser.role === 'admin') {
+            return (
+                <AdminDashboard
+                    user={currentUser}
+                    activeView={activeView}
+                    onLogout={handleLogout}
+                    onNavigate={handleNavigate}
+                />
+            );
+        }
+    }
+
+    if (view === 'profile' && currentUser && currentUser.role === 'client') {
+        return (
+            <ClientProfile
+                user={currentUser}
+                activeView={activeView}
+                onLogout={handleLogout}
+                onNavigate={handleNavigate}
+            />
+        );
+    }
+
+    if (view === 'tracking' && selectedTicketId) {
+        return (
+            <TicketTracking
+                ticketId={selectedTicketId}
+                onBack={() => window.history.back()}
+            />
+        );
+    }
+
+    return null;
+}
