@@ -11,12 +11,8 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('machines', function (Blueprint $table) {
-            $table->id();
-            $table->string('nom_poste');
-            $table->string('code_anydesk')->nullable();
-            $table->foreignId('id_client')->constrained('clients')->onDelete('cascade');
-            $table->timestamps();
+        Schema::table('machines', function (Blueprint $table) {
+            $table->string('code_anydesk')->nullable()->change();
         });
     }
 
@@ -25,6 +21,8 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::dropIfExists('machines');
+        Schema::table('machines', function (Blueprint $table) {
+            $table->string('code_anydesk')->change();
+        });
     }
 };

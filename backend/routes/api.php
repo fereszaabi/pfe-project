@@ -7,17 +7,15 @@ use App\Http\Controllers\Api\ClientController;
 use App\Http\Controllers\Api\EmployeeController;
 use App\Http\Controllers\Api\RegisterController;
 use App\Http\Controllers\Api\AdminUserController;
+use App\Http\Controllers\Api\MachineController;
+use App\Http\Controllers\Api\MessagingController;
+use App\Http\Controllers\Api\ClientProfileController;
 
 /*
 |--------------------------------------------------------------------------
 | API Routes
 |--------------------------------------------------------------------------
-|
-| Here is where you can register API routes for your application. These
-| routes are loaded by the RouteServiceProvider and all of them will
-| be assigned to the "api" middleware group. Make something great!
-|
-*/
+
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
@@ -32,15 +30,21 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Client
     Route::apiResource('client/tickets', ClientController::class)
-         ->only(['index', 'store']);
+         ->only(['index', 'store', 'show', 'destroy']);
+    Route::post('client/tickets/{ticket}/rate', [ClientController::class, 'rate']);
+    Route::apiResource('client/machines', MachineController::class)
+         ->only(['index', 'store', 'update', 'destroy']);
 
     // Employee
     Route::middleware('role:employee')->group(function () {
-        Route::apiResource('employee/tickets', EmployeeController::class)
-             ->only(['index', 'show', 'update']);
-        Route::post('employee/tickets/{demande}/assign', [EmployeeController::class, 'assign']);
-        Route::post('employee/tickets/{ticket}/reply', [EmployeeController::class, 'reply']);
+        Route::get('employee/tickets', [EmployeeController::class, 'index']);
+        Route::get('employee/tickets/{demande}', [EmployeeController::class, 'show']);
+        Route::post('employee/tickets/{demande}/claim', [EmployeeController::class, 'claim']);
+        Route::post('employee/tickets/{demande}/unclaim', [EmployeeController::class, 'unclaim']);
+        Route::patch('employee/tickets/{demande}', [EmployeeController::class, 'update']);
+        Route::post('employee/tickets/{demande}/rate', [EmployeeController::class, 'rate']);
         Route::get('employee/stats', [EmployeeController::class, 'stats']);
+        Route::get('employee/leaderboard', [EmployeeController::class, 'leaderboard']);
     });
 
     // Admin
@@ -53,5 +57,17 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('/admin/demandes/{demande}/status', [AdminUserController::class, 'update_statu']);
         Route::delete('/admin/users/{user}', [AdminUserController::class, 'destroy']);
         Route::patch('/admin/clients/{client}/take-money', [AdminUserController::class, 'takeMoney']);
+    });
+
+    // Messaging (available to employees, admins, and clients)
+    Route::middleware('role:employee|admin|client')->group(function () {
+        Route::get('messages/conversations', [MessagingController::class, 'conversations']);
+        Route::get('messages/conversations/{conversationId}', [MessagingController::class, 'getMessages']);
+        Route::post('messages/send', [MessagingController::class, 'sendMessage']);
+        Route::post('messages/start/{userId}', [MessagingController::class, 'startConversation']);
+        Route::get('messages/available-employees', [MessagingController::class, 'getAvailableEmployees']);
+        Route::get('messages/unread', [MessagingController::class, 'unreadSummary']);
+        Route::get('messages/search', [MessagingController::class, 'searchMessages']);
+        Route::delete('messages/{messageId}', [MessagingController::class, 'deleteMessage']);
     });
 });

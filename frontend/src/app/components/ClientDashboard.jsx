@@ -1,11 +1,15 @@
 import { useState, useEffect } from 'react';
-import { getClientTickets, createTicket } from '../../services/api';
+import { getClientTickets, createTicket, rateEmployee } from '../../services/api';
 
 export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, activeView }) {
     const [showCreateTicket, setShowCreateTicket] = useState(false);
     const [tickets, setTickets] = useState([]);
     const [loadingTickets, setLoadingTickets] = useState(true);
     const [submitError, setSubmitError] = useState('');
+    const [ratingTicket, setRatingTicket] = useState(null);
+    const [ratingValue, setRatingValue] = useState(0);
+    const [ratingComment, setRatingComment] = useState('');
+    const [isSubmittingRating, setIsSubmittingRating] = useState(false);
     const [newTicket, setNewTicket] = useState({
         titre: '',
         description: '',
@@ -49,6 +53,25 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 ? Object.values(err.errors).flat().join(' ')
                 : err?.message || 'Failed to submit ticket.';
             setSubmitError(msg);
+        }
+    };
+
+    const handleSubmitRating = async () => {
+        if (!ratingTicket || ratingValue === 0) return;
+
+        setIsSubmittingRating(true);
+        try {
+            await rateEmployee(ratingTicket.id, ratingValue);
+            // Refresh tickets
+            const data = await getClientTickets();
+            setTickets(data.demandes?.data ?? data.demandes ?? []);
+            setRatingTicket(null);
+            setRatingValue(0);
+            setRatingComment('');
+        } catch (err) {
+            console.error('Failed to submit rating:', err);
+        } finally {
+            setIsSubmittingRating(false);
         }
     };
 
@@ -401,13 +424,31 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                                 <td className="px-6 py-4 text-sm text-slate-500 dark:text-slate-400">
                                                     {new Date(ticket.created_at).toLocaleDateString()}
                                                 </td>
-                                                <td className="px-6 py-4 text-right">
-                                                    <button
-                                                        onClick={() => onViewTicket(ticket.id)}
-                                                        className="text-slate-500 hover:text-primary transition-colors"
-                                                    >
-                                                        <span className="material-symbols-outlined">visibility</span>
-                                                    </button>
+                                                <td className="px-6 py-4 text-right flex items-center justify-end gap-2">
+                                                    {ticket.status === 'resolved' && !ticket.client_rating ? (
+                                                        <button
+                                                            onClick={() => setRatingTicket(ticket)}
+                                                            className="text-amber-500 hover:text-amber-600 transition-colors flex items-center gap-1"
+                                                            title="Rate this service"
+                                                        >
+                                                            <span className="material-symbols-outlined text-lg">star</span>
+                                                        </button>
+                                                    ) : ticket.status === 'resolved' && ticket.client_rating ? (
+                                                        <div className="flex items-center gap-1">
+                                                            {[...Array(5)].map((_, i) => (
+                                                                <span key={i} className="material-symbols-outlined text-sm" style={{ color: i < ticket.client_rating ? '#fbbf24' : '#cbd5e1' }}>
+                                                                    star
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <button
+                                                            onClick={() => onViewTicket(ticket.id)}
+                                                            className="text-slate-500 hover:text-primary transition-colors"
+                                                        >
+                                                            <span className="material-symbols-outlined">visibility</span>
+                                                        </button>
+                                                    )}
                                                 </td>
                                             </tr>
                                         ))}
@@ -418,6 +459,80 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     </div>
                 </div>
             </main>
+
+            {/* Rating Modal */}
+            {ratingTicket && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setRatingTicket(null)}>
+                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl max-w-md w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                        <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                            <h3 className="text-lg font-bold text-slate-900 dark:text-white">Rate Your Experience</h3>
+                            <button onClick={() => setRatingTicket(null)} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors">
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-6">
+                            <div>
+                                <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">How satisfied are you with the support provided?</p>
+                                <div className="flex justify-center gap-2">
+                                    {[1, 2, 3, 4, 5].map((star) => (
+                                        <button
+                                            key={star}
+                                            onClick={() => setRatingValue(star)}
+                                            className="transition-transform hover:scale-110"
+                                        >
+                                            <span
+                                                className="material-symbols-outlined text-4xl cursor-pointer"
+                                                style={{
+                                                    color: star <= ratingValue ? '#fbbf24' : '#cbd5e1',
+                                                    transition: 'color 0.2s'
+                                                }}
+                                            >
+                                                star
+                                            </span>
+                                        </button>
+                                    ))}
+                                </div>
+                                {ratingValue > 0 && (
+                                    <p className="text-center mt-2 text-sm font-medium text-slate-900 dark:text-white">
+                                        {ratingValue} out of 5 stars
+                                    </p>
+                                )}
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                                    Additional Comment (optional)
+                                </label>
+                                <textarea
+                                    value={ratingComment}
+                                    onChange={(e) => setRatingComment(e.target.value)}
+                                    placeholder="Share your feedback..."
+                                    className="w-full px-4 py-3 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary text-slate-900 dark:text-white placeholder-slate-400"
+                                    rows="3"
+                                />
+                            </div>
+
+                            <div className="flex gap-3 justify-end">
+                                <button
+                                    onClick={() => setRatingTicket(null)}
+                                    className="px-6 py-2 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleSubmitRating}
+                                    disabled={isSubmittingRating || ratingValue === 0}
+                                    className="px-6 py-2 bg-primary hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition-colors flex items-center gap-2"
+                                >
+                                    <span className="material-symbols-outlined text-sm">star</span>
+                                    Submit Rating
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

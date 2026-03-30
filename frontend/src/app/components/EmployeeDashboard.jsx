@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { Ticket, Users, Clock, CheckCircle, AlertTriangle, LogOut, User, Filter, Search } from 'lucide-react';
-import { getEmployeeTickets, assignTicket, updateEmployeeTicket } from '../../services/api';
+import { Ticket, Users, Clock, CheckCircle, AlertTriangle, LogOut, User, Filter, Search, Send, Star } from 'lucide-react';
+import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmployeeTicket, sendMessage, startConversation, getEmployeeStats } from '../../services/api';
 
 export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const [selectedTicket, setSelectedTicket] = useState(null);
@@ -10,13 +11,19 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const [tickets, setTickets] = useState([]);
     const [newDemandes, setNewDemandes] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [employeeStats, setEmployeeStats] = useState(null);
+    const [showMessageModal, setShowMessageModal] = useState(false);
+    const [messageText, setMessageText] = useState('');
+    const [isSubmittingMessage, setIsSubmittingMessage] = useState(false);
+    const [showOnlyMyTickets, setShowOnlyMyTickets] = useState(false);
 
     const fetchTickets = () => {
         setLoading(true);
-        getEmployeeTickets()
-            .then((data) => {
+        Promise.all([getEmployeeTickets(), getEmployeeStats()])
+            .then(([data, stats]) => {
                 setTickets(data.demandes?.data ?? data.demandes ?? []);
                 setNewDemandes(data.new_demandes?.data ?? data.new_demandes ?? []);
+                setEmployeeStats(stats);
             })
             .catch(() => {})
             .finally(() => setLoading(false));
@@ -29,6 +36,51 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
             await assignTicket(ticketId);
             fetchTickets();
         } catch (_) {}
+    };
+
+    const handleClaimTicket = async (ticketId) => {
+        try {
+            await claimTicket(ticketId);
+            fetchTickets();
+            setSelectedTicket(null);
+        } catch (_) {}
+    };
+
+    const handleUnclaimTicket = async (ticketId) => {
+        try {
+            await unclaimTicket(ticketId);
+            fetchTickets();
+            setSelectedTicket(null);
+        } catch (_) {}
+    };
+
+    const handleContactClient = async (ticket) => {
+        try {
+            if (ticket.client?.id) {
+                await startConversation(ticket.client.id);
+            }
+            setShowMessageModal(true);
+        } catch (_) {}
+    };
+
+    const handleSendMessage = async () => {
+        if (!messageText.trim() || !selectedTicket?.client?.id) return;
+        
+        setIsSubmittingMessage(true);
+        try {
+            await sendMessage({
+                recipient_id: selectedTicket.client.id,
+                message: messageText,
+                ticket_id: selectedTicket.id,
+            });
+            setMessageText('');
+            setShowMessageModal(false);
+            // Show success message
+        } catch (_) {
+            // Show error
+        } finally {
+            setIsSubmittingMessage(false);
+        }
     };
 
     const handleStartWork = async (ticketId) => {
@@ -90,7 +142,11 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
 
     const priorityOrder = { urgent: 0, high: 1, medium: 2, low: 3 };
 
-    const filteredTickets = [...newDemandes, ...tickets]
+    const allTickets = showOnlyMyTickets 
+        ? tickets 
+        : [...newDemandes, ...tickets];
+    
+    const filteredTickets = allTickets
         .filter(t => filterStatus === 'all' || t.status === filterStatus)
         .filter(t => searchQuery === '' ||
             t.titre?.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -98,12 +154,47 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         )
         .sort((a, b) => (priorityOrder[a.priority] ?? 4) - (priorityOrder[b.priority] ?? 4));
 
-    const allTickets = [...tickets, ...newDemandes];
     const stats = {
         total: allTickets.length,
         submitted: newDemandes.length,
-        inProgress: tickets.filter(t => t.status === 'in progress' || t.status === 'in-progress').length,
-        resolved: tickets.filter(t => t.status === 'resolved').length
+        inProgress: allTickets.filter(t => t.status === 'in progress' || t.status === 'in-progress').length,
+        resolved: allTickets.filter(t => t.status === 'resolved').length
+    };
+
+    // performance chart data by grouping resolved tickets by week
+    const getPerformanceChartData = () => {
+        const resolved = allTickets.filter(t => t.status === 'resolved');
+        const weekData = {};
+        resolved.forEach(ticket => {
+            const date = new Date(ticket.completed_at);
+            const week = `Week ${Math.ceil(date.getDate() / 7)}`;
+            if (!weekData[week]) {
+                weekData[week] = { name: week, tickets: 0, avgRating: 0 };
+            }
+            weekData[week].tickets += 1;
+            weekData[week].avgRating = (weekData[week].avgRating + (ticket.client_rating || 0)) / 2;
+        });
+        return Object.values(weekData).slice(-8); // Last 8 weeks
+    };
+
+    //  priority breakdown data
+    const getPriorityChartData = () => {
+        return [
+            { name: 'Urgent', value: allTickets.filter(t => t.priority === 'urgent').length, color: '#dc2626' },
+            { name: 'High', value: allTickets.filter(t => t.priority === 'high').length, color: '#f97316' },
+            { name: 'Medium', value: allTickets.filter(t => t.priority === 'medium').length, color: '#eab308' },
+            { name: 'Low', value: allTickets.filter(t => t.priority === 'low').length, color: '#22c55e' }
+        ].filter(item => item.value > 0);
+    };
+
+    //  status breakdown chart data
+    const getStatusChartData = () => {
+        return [
+            { name: 'Submitted', value: allTickets.filter(t => t.status === 'submitted').length },
+            { name: 'Assigned', value: allTickets.filter(t => t.status === 'assigned').length },
+            { name: 'In Progress', value: allTickets.filter(t => ['in-progress', 'in progress'].includes(t.status)).length },
+            { name: 'Resolved', value: allTickets.filter(t => t.status === 'resolved').length }
+        ].filter(item => item.value > 0);
     };
 
     return (
@@ -265,6 +356,78 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                             </div>
                         </div>
 
+                        {/* Performance Charts */}
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            {/* Resolution Performance Chart */}
+                            <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm">
+                                <h3 className="font-bold text-lg text-slate-900 dark:text-white mb-4">Resolution Performance</h3>
+                                <ResponsiveContainer width="100%" height={250}>
+                                    <LineChart data={getPerformanceChartData()}>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#3a2f27" />
+                                        <XAxis dataKey="name" stroke="#bba99b" style={{ fontSize: '12px' }} />
+                                        <YAxis stroke="#bba99b" style={{ fontSize: '12px' }} />
+                                        <Tooltip contentStyle={{ backgroundColor: '#1e1a16', border: '1px solid #3a2f27', borderRadius: '8px', color: '#fff' }} />
+                                        <Legend />
+                                        <Line type="monotone" dataKey="tickets" stroke="#f96f06" name="Tickets Completed" strokeWidth={2} />
+                                    </LineChart>
+                                </ResponsiveContainer>
+                            </div>
+
+                            {/* Priority Distribution */}
+                            <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm">
+                                <h3 className="font-bold text-lg text-slate-900 dark:text-white mb-4">Priority Distribution</h3>
+                                <ResponsiveContainer width="100%" height={250}>
+                                    <PieChart>
+                                        <Pie data={getPriorityChartData()} cx="50%" cy="50%" labelLine={false} label={({ name, value }) => `${name} (${value})`} outerRadius={80} fill="#8884d8" dataKey="value">
+                                            {getPriorityChartData().map((entry, index) => (
+                                                <Cell key={`cell-${index}`} fill={entry.color} />
+                                            ))}
+                                        </Pie>
+                                        <Tooltip />
+                                    </PieChart>
+                                </ResponsiveContainer>
+                            </div>
+
+                            {/* Status Distribution */}
+                            <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm lg:col-span-2">
+                                <h3 className="font-bold text-lg text-slate-900 dark:text-white mb-4">Ticket Status Overview</h3>
+                                <ResponsiveContainer width="100%" height={250}>
+                                    <BarChart data={getStatusChartData()}>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#3a2f27" />
+                                        <XAxis dataKey="name" stroke="#bba99b" style={{ fontSize: '12px' }} />
+                                        <YAxis stroke="#bba99b" style={{ fontSize: '12px' }} />
+                                        <Tooltip contentStyle={{ backgroundColor: '#1e1a16', border: '1px solid #3a2f27', borderRadius: '8px', color: '#fff' }} />
+                                        <Bar dataKey="value" fill="#f96f06" radius={[8, 8, 0, 0]} />
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+
+                            {/* Performance Metrics */}
+                            {employeeStats && (
+                                <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm lg:col-span-2">
+                                    <h3 className="font-bold text-lg text-slate-900 dark:text-white mb-6">Performance Metrics</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                        <div className="bg-slate-50 dark:bg-[#3a2f27]/30 p-4 rounded-lg">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-[#bba99b] mb-1">Avg Response Time</p>
+                                            <p className="text-2xl font-bold text-slate-900 dark:text-white">{(employeeStats.avg_resolution_hours ?? 0).toFixed(1)}h</p>
+                                        </div>
+                                        <div className="bg-slate-50 dark:bg-[#3a2f27]/30 p-4 rounded-lg">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-[#bba99b] mb-1">Avg Rating</p>
+                                            <p className="text-2xl font-bold text-yellow-500">{(employeeStats.avg_rating ?? 0).toFixed(1)}/5</p>
+                                        </div>
+                                        <div className="bg-slate-50 dark:bg-[#3a2f27]/30 p-4 rounded-lg">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-[#bba99b] mb-1">Tickets Completed</p>
+                                            <p className="text-2xl font-bold text-slate-900 dark:text-white">{employeeStats.tickets_completed ?? 0}</p>
+                                        </div>
+                                        <div className="bg-slate-50 dark:bg-[#3a2f27]/30 p-4 rounded-lg">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-[#bba99b] mb-1">Current Workload</p>
+                                            <p className="text-2xl font-bold text-primary">{employeeStats.current_workload ?? 0}</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
                         {/* Ticket Management Table */}
                         <div className="bg-white dark:bg-[#1e1a16] rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm overflow-hidden flex flex-col">
                             <div className="px-6 py-5 border-b border-slate-200 dark:border-[#3a2f27] flex flex-wrap items-center justify-between gap-4">
@@ -273,6 +436,20 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                     <span className="bg-primary/10 text-primary px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider">Queue</span>
                                 </div>
                                 <div className="flex items-center gap-3">
+                                    <div className="flex rounded-lg border border-slate-200 dark:border-[#3a2f27] p-1 bg-slate-50 dark:bg-[#181411]">
+                                        <button
+                                            onClick={() => setShowOnlyMyTickets(false)}
+                                            className={`px-3 py-1 text-xs font-semibold rounded-md transition-all ${!showOnlyMyTickets ? 'bg-primary text-white' : 'text-slate-500 hover:text-primary'}`}
+                                        >
+                                            All Tickets
+                                        </button>
+                                        <button
+                                            onClick={() => setShowOnlyMyTickets(true)}
+                                            className={`px-3 py-1 text-xs font-semibold rounded-md transition-all ${showOnlyMyTickets ? 'bg-primary text-white' : 'text-slate-500 hover:text-primary'}`}
+                                        >
+                                            My Tickets
+                                        </button>
+                                    </div>
                                     <div className="flex rounded-lg border border-slate-200 dark:border-[#3a2f27] p-1 bg-slate-50 dark:bg-[#181411]">
                                         <button
                                             onClick={() => setFilterStatus('all')}
@@ -398,8 +575,8 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                     <div className="bg-white dark:bg-[#1e1a16] border border-slate-200 dark:border-[#3a2f27] rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
                         <div className="p-6 border-b border-slate-200 dark:border-[#3a2f27] flex items-center justify-between sticky top-0 bg-white dark:bg-[#1e1a16] z-10">
                             <div>
-                            <h3 className="text-xl font-bold text-slate-900 dark:text-white">Ticket #{String(selectedTicket.id).slice(0, 8)}</h3>
-                                <p className="text-sm text-[#bba99b] mt-0.5">{selectedTicket.client?.nom || `Client #${selectedTicket.id_client}`}</p>
+                                <h3 className="text-xl font-bold text-slate-900 dark:text-white">Ticket #{String(selectedTicket.id).slice(0, 8)}</h3>
+                                <p className="text-sm text-[#bba99b] mt-0.5">{selectedTicket.client?.nom || selectedTicket.client?.name || `Client #${selectedTicket.id_client}`}</p>
                             </div>
                             <button onClick={() => setSelectedTicket(null)} className="p-2 hover:bg-slate-100 dark:hover:bg-[#3a2f27] rounded-lg transition-colors text-[#bba99b]">
                                 <span className="material-symbols-outlined">close</span>
@@ -413,8 +590,24 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                     <p className="text-lg font-bold text-slate-900 dark:text-white">{selectedTicket.titre || `Ticket #${selectedTicket.id}`}</p>
                                 </div>
                                 <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Software Category</label>
-                                    <span className="px-2 py-1 bg-primary/10 text-primary text-[10px] font-bold rounded uppercase">{selectedTicket.category}</span>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Status</label>
+                                    <span className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase ${
+                                        selectedTicket.status === 'resolved' ? 'bg-green-500/10 text-green-500' :
+                                        selectedTicket.status === 'in-progress' || selectedTicket.status === 'in progress' ? 'bg-blue-500/10 text-blue-500' :
+                                        selectedTicket.status === 'assigned' ? 'bg-purple-500/10 text-purple-500' :
+                                        'bg-primary/10 text-primary'
+                                    }`}>{selectedTicket.status}</span>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Priority</label>
+                                    <span className="px-2 py-1 bg-primary/10 text-primary text-[10px] font-bold rounded uppercase inline-block">{selectedTicket.priority}</span>
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Assigned To</label>
+                                    <p className="text-sm font-semibold text-slate-900 dark:text-white">{selectedTicket.employee?.name || selectedTicket.id_employee ? `Employee #${selectedTicket.id_employee}` : 'Unassigned'}</p>
                                 </div>
                             </div>
 
@@ -425,33 +618,132 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                 </div>
                             </div>
 
-                            <div className="pt-6 border-t border-slate-100 dark:border-[#3a2f27] space-y-6">
+                            {selectedTicket.image && (
                                 <div>
-                                    <label className="text-sm font-bold text-slate-900 dark:text-white mb-3 block">Resolution Notes</label>
-                                    <textarea
-                                        value={notes}
-                                        onChange={(e) => setNotes(e.target.value)}
-                                        className="w-full bg-slate-50 dark:bg-[#181411] border border-slate-200 dark:border-[#3a2f27] rounded-xl p-4 text-sm focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white placeholder-slate-400 min-h-[120px]"
-                                        placeholder="Enter technical resolution steps or update client status..."
-                                    />
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Attached Image</label>
+                                    <img src={selectedTicket.image} alt="Ticket attachment" className="rounded-lg max-h-48 w-full object-cover" />
                                 </div>
+                            )}
 
-                                <div className="flex gap-4">
-                                    <button
-                                        onClick={() => handleResolve(selectedTicket.id)}
-                                        className="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-green-600/20"
-                                    >
-                                        <span className="material-symbols-outlined text-lg">check_circle</span>
-                                        Resolve Ticket
-                                    </button>
-                                    <button
-                                        onClick={() => handleEscalate(selectedTicket.id)}
-                                        className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-600/20"
-                                    >
-                                        <span className="material-symbols-outlined text-lg">warning</span>
-                                        Escalate to IT
-                                    </button>
+                            {selectedTicket.employee_note && (
+                                <div>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Employee Notes</label>
+                                    <div className="bg-slate-50 dark:bg-[#181411] p-4 rounded-lg border border-slate-100 dark:border-[#3a2f27]">
+                                        <p className="text-sm text-slate-600 dark:text-[#bba99b]">{selectedTicket.employee_note}</p>
+                                    </div>
                                 </div>
+                            )}
+
+                            {selectedTicket.client_rating && (
+                                <div>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Client Rating</label>
+                                    <div className="flex items-center gap-2">
+                                        {[...Array(5)].map((_, i) => (
+                                            <Star
+                                                key={i}
+                                                size={20}
+                                                className={i < selectedTicket.client_rating ? 'fill-yellow-400 text-yellow-400' : 'text-slate-300'}
+                                            />
+                                        ))}
+                                        <span className="ml-2 text-sm font-semibold text-slate-900 dark:text-white">{selectedTicket.client_rating}/5</span>
+                                    </div>
+                                </div>
+                            )}
+
+                            {selectedTicket.status !== 'resolved' && (
+                                <div className="pt-6 border-t border-slate-100 dark:border-[#3a2f27] space-y-6">
+                                    <div>
+                                        <label className="text-sm font-bold text-slate-900 dark:text-white mb-3 block">Resolution Notes</label>
+                                        <textarea
+                                            value={notes}
+                                            onChange={(e) => setNotes(e.target.value)}
+                                            className="w-full bg-slate-50 dark:bg-[#181411] border border-slate-200 dark:border-[#3a2f27] rounded-xl p-4 text-sm focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white placeholder-slate-400 min-h-[120px]"
+                                            placeholder="Enter technical resolution steps or update client status..."
+                                        />
+                                    </div>
+
+                                    <div className="flex flex-col gap-3">
+                                        {!selectedTicket.id_employee ? (
+                                            <button
+                                                onClick={() => handleClaimTicket(selectedTicket.id)}
+                                                className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-amber-600/20"
+                                            >
+                                                <span className="material-symbols-outlined text-lg">check_circle</span>
+                                                Claim Ticket
+                                            </button>
+                                        ) : (
+                                            <div className="flex gap-3">
+                                                <button
+                                                    onClick={() => handleResolve(selectedTicket.id)}
+                                                    className="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-green-600/20"
+                                                >
+                                                    <span className="material-symbols-outlined text-lg">check_circle</span>
+                                                    Resolve Ticket
+                                                </button>
+                                                <button
+                                                    onClick={() => handleEscalate(selectedTicket.id)}
+                                                    className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-600/20"
+                                                >
+                                                    <span className="material-symbols-outlined text-lg">warning</span>
+                                                    Escalate to IT
+                                                </button>
+                                                <button
+                                                    onClick={() => handleContactClient(selectedTicket)}
+                                                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20"
+                                                >
+                                                    <span className="material-symbols-outlined text-lg">message</span>
+                                                    Contact Client
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Message Modal */}
+            {showMessageModal && selectedTicket && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowMessageModal(false)}>
+                    <div className="bg-white dark:bg-[#1e1a16] border border-slate-200 dark:border-[#3a2f27] rounded-xl max-w-lg w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                        <div className="p-6 border-b border-slate-200 dark:border-[#3a2f27] flex items-center justify-between">
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Contact Client</h3>
+                                <p className="text-sm text-[#bba99b]">{selectedTicket.client?.nom || selectedTicket.client?.name || 'Client'}</p>
+                            </div>
+                            <button onClick={() => setShowMessageModal(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-[#3a2f27] rounded-lg transition-colors">
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-4">
+                            <div>
+                                <label className="text-sm font-bold text-slate-900 dark:text-white mb-2 block">Message</label>
+                                <textarea
+                                    value={messageText}
+                                    onChange={(e) => setMessageText(e.target.value)}
+                                    placeholder="Type your message to the client..."
+                                    className="w-full bg-slate-50 dark:bg-[#181411] border border-slate-200 dark:border-[#3a2f27] rounded-lg p-3 text-sm focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white placeholder-slate-400 min-h-[120px]"
+                                />
+                            </div>
+
+                            <div className="flex gap-3 justify-end">
+                                <button
+                                    onClick={() => setShowMessageModal(false)}
+                                    className="px-6 py-2 border border-slate-200 dark:border-[#3a2f27] rounded-lg text-slate-700 dark:text-slate-300 font-semibold hover:bg-slate-50 dark:hover:bg-[#3a2f27] transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleSendMessage}
+                                    disabled={isSubmittingMessage || !messageText.trim()}
+                                    className="px-6 py-2 bg-primary hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition-all flex items-center gap-2"
+                                >
+                                    <Send size={16} />
+                                    Send Message
+                                </button>
                             </div>
                         </div>
                     </div>

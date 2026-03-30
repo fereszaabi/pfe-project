@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { getClientMachines, createMachine, updateMachine, deleteMachine } from '../../services/api';
 
 export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
     const [showPassword, setShowPassword] = useState(false);
@@ -12,12 +13,29 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
         confirmPassword: ''
     });
 
-    const [anydeskCodes, setAnydeskCodes] = useState([
-        { id: 1, label: 'Main POS Terminal', code: '123 456 789' },
-        { id: 2, label: 'Office Server', code: '987 654 321' }
-    ]);
+    const [anydeskCodes, setAnydeskCodes] = useState([]);
+    const [loadingMachines, setLoadingMachines] = useState(true);
     const [addingCode, setAddingCode] = useState(false);
     const [newCode, setNewCode] = useState({ label: '', code: '' });
+    const [savingCode, setSavingCode] = useState(false);
+    const [deleteError, setDeleteError] = useState(null);
+
+    // Load machines on component mount
+    useEffect(() => {
+        loadMachines();
+    }, []);
+
+    const loadMachines = async () => {
+        try {
+            setLoadingMachines(true);
+            const data = await getClientMachines();
+            setAnydeskCodes(data);
+        } catch (err) {
+            console.error('Error loading machines:', err);
+        } finally {
+            setLoadingMachines(false);
+        }
+    };
 
     const handleSaveProfile = () => {
         console.log('Saving profile:', profileData);
@@ -28,15 +46,34 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
         setNewCode({ label: '', code: '' });
     };
 
-    const handleConfirmAddCode = () => {
+    const handleConfirmAddCode = async () => {
         if (!newCode.label.trim() || !newCode.code.trim()) return;
-        setAnydeskCodes([...anydeskCodes, { id: Date.now(), label: newCode.label.trim(), code: newCode.code.trim() }]);
-        setAddingCode(false);
-        setNewCode({ label: '', code: '' });
+        
+        try {
+            setSavingCode(true);
+            const saved = await createMachine({
+                nom_poste: newCode.label.trim(),
+                code_anydesk: newCode.code.trim()
+            });
+            setAnydeskCodes([...anydeskCodes, saved]);
+            setAddingCode(false);
+            setNewCode({ label: '', code: '' });
+        } catch (err) {
+            console.error('Error saving machine:', err);
+        } finally {
+            setSavingCode(false);
+        }
     };
 
-    const handleDeleteAnydeskCode = (id) => {
-        setAnydeskCodes(anydeskCodes.filter(code => code.id !== id));
+    const handleDeleteAnydeskCode = async (id) => {
+        try {
+            setDeleteError(null);
+            await deleteMachine(id);
+            setAnydeskCodes(anydeskCodes.filter(code => code.id !== id));
+        } catch (err) {
+            console.error('Error deleting machine:', err);
+            setDeleteError('Failed to delete machine');
+        }
     };
 
     const handleCopyCode = (code) => {
@@ -163,67 +200,90 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
                                     </h4>
                                     <button
                                         onClick={handleAddAnydeskCode}
-                                        className="p-1 hover:bg-primary/10 rounded text-primary transition-colors"
+                                        disabled={loadingMachines || addingCode}
+                                        className="p-1 hover:bg-primary/10 rounded text-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                     >
                                         <span className="material-symbols-outlined">add</span>
                                     </button>
                                 </div>
                                 <div className="divide-y divide-slate-100 dark:divide-slate-700">
-                                    {addingCode && (
-                                        <div className="p-4 space-y-2 bg-primary/5 border-b border-slate-100 dark:border-slate-700">
-                                            <input
-                                                autoFocus
-                                                type="text"
-                                                placeholder="Label (e.g. Office PC)"
-                                                value={newCode.label}
-                                                onChange={(e) => setNewCode({ ...newCode, label: e.target.value })}
-                                                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary text-slate-900 dark:text-white"
-                                            />
-                                            <input
-                                                type="text"
-                                                placeholder="AnyDesk ID (e.g. 123 456 789)"
-                                                value={newCode.code}
-                                                onChange={(e) => setNewCode({ ...newCode, code: e.target.value })}
-                                                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary font-mono text-slate-900 dark:text-white"
-                                            />
-                                            <div className="flex gap-2 pt-1">
-                                                <button
-                                                    onClick={handleConfirmAddCode}
-                                                    className="flex-1 py-1.5 bg-primary text-white text-xs font-bold rounded-lg hover:bg-orange-600 transition-colors"
-                                                >
-                                                    Add
-                                                </button>
-                                                <button
-                                                    onClick={() => setAddingCode(false)}
-                                                    className="flex-1 py-1.5 border border-slate-300 dark:border-slate-600 text-slate-500 text-xs font-bold rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-                                                >
-                                                    Cancel
-                                                </button>
-                                            </div>
+                                    {loadingMachines ? (
+                                        <div className="p-6 text-center">
+                                            <p className="text-slate-500 text-sm">Loading machines...</p>
                                         </div>
-                                    )}
-                                    {anydeskCodes.map((machine) => (
-                                        <div key={machine.id} className="p-4 flex justify-between items-center group">
-                                            <div>
-                                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{machine.label}</p>
-                                                <div className="flex items-center gap-2">
-                                                    <p className="font-mono text-sm text-slate-900 dark:text-slate-100">{machine.code}</p>
-                                                    <span
-                                                        onClick={() => handleCopyCode(machine.code)}
-                                                        className="material-symbols-outlined text-xs text-slate-400 cursor-pointer hover:text-primary"
-                                                    >
-                                                        content_copy
-                                                    </span>
+                                    ) : (
+                                        <>
+                                            {addingCode && (
+                                                <div className="p-4 space-y-2 bg-primary/5 border-b border-slate-100 dark:border-slate-700">
+                                                    <input
+                                                        autoFocus
+                                                        type="text"
+                                                        placeholder="Label (e.g. Office PC)"
+                                                        value={newCode.label}
+                                                        onChange={(e) => setNewCode({ ...newCode, label: e.target.value })}
+                                                        className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary text-slate-900 dark:text-white"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="AnyDesk ID (e.g. 123 456 789)"
+                                                        value={newCode.code}
+                                                        onChange={(e) => setNewCode({ ...newCode, code: e.target.value })}
+                                                        className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary font-mono text-slate-900 dark:text-white"
+                                                    />
+                                                    <div className="flex gap-2 pt-1">
+                                                        <button
+                                                            onClick={handleConfirmAddCode}
+                                                            disabled={savingCode}
+                                                            className="flex-1 py-1.5 bg-primary text-white text-xs font-bold rounded-lg hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                        >
+                                                            {savingCode ? 'Saving...' : 'Add'}
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setAddingCode(false)}
+                                                            className="flex-1 py-1.5 border border-slate-300 dark:border-slate-600 text-slate-500 text-xs font-bold rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                    </div>
                                                 </div>
-                                            </div>
-                                            <span
-                                                onClick={() => handleDeleteAnydeskCode(machine.id)}
-                                                className="material-symbols-outlined text-slate-400 opacity-0 group-hover:opacity-100 cursor-pointer hover:text-red-500 text-lg transition-opacity"
-                                            >
-                                                delete
-                                            </span>
-                                        </div>
-                                    ))}
+                                            )}
+                                            {anydeskCodes.length === 0 ? (
+                                                <div className="p-6 text-center">
+                                                    <p className="text-slate-500 text-sm">No machines added yet. Click the + button to add one.</p>
+                                                </div>
+                                            ) : (
+                                                anydeskCodes.map((machine) => (
+                                                    <div key={machine.id} className="p-4 flex justify-between items-center group">
+                                                        <div>
+                                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{machine.nom_poste}</p>
+                                                            <div className="flex items-center gap-2">
+                                                                <p className="font-mono text-sm text-slate-900 dark:text-slate-100">{machine.code_anydesk || 'No code set'}</p>
+                                                                {machine.code_anydesk && (
+                                                                    <span
+                                                                        onClick={() => handleCopyCode(machine.code_anydesk)}
+                                                                        className="material-symbols-outlined text-xs text-slate-400 cursor-pointer hover:text-primary"
+                                                                    >
+                                                                        content_copy
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        <span
+                                                            onClick={() => handleDeleteAnydeskCode(machine.id)}
+                                                            className="material-symbols-outlined text-slate-400 opacity-0 group-hover:opacity-100 cursor-pointer hover:text-red-500 text-lg transition-opacity"
+                                                        >
+                                                            delete
+                                                        </span>
+                                                    </div>
+                                                ))
+                                            )}
+                                            {deleteError && (
+                                                <div className="p-3 bg-red-50 dark:bg-red-900/20 border-t border-red-200 dark:border-red-800">
+                                                    <p className="text-xs text-red-600 dark:text-red-400">{deleteError}</p>
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
                                 </div>
                                 <div className="p-3 bg-slate-50 dark:bg-slate-800/30 text-center">
                                     <p className="text-[10px] text-slate-500">Provide these IDs to support for remote assistance.</p>

@@ -1,49 +1,194 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { getClientTicket, deleteTicket } from '../../services/api';
 
 export function TicketTracking({ ticketId, onBack }) {
-    // Mock data for the specific ticket based on the HTML
-    const ticket = {
-        id: ticketId || 'ID-8829',
-        status: 'Active',
-        priority: 'High',
-        category: 'Hardware Repair',
-        workstationId: 'WS-ALPHA-292',
-        slaRemaining: '04:22:15',
-        technician: {
-            name: 'Marco Rivera',
-            role: 'Senior Hardware Specialist',
-            avatar: 'https://lh3.googleusercontent.com/aida-public/AB6AXuDo59qvaJ5K4G00V7hcygQZAe3jB9hKPpNkb_8FpnDYorOKay5rjSl5GhZtuh9l2R3VcA-sGNmALRirb5jULj5nI1vwXxmYpYxc7k8shSQ0PwnzWWz_jNLZZELFCV08zgNieASHWUwlTWAIDKQ3SL4ndci7Bo0o2Heh7LdfJhnAjGcwm36T_CDe9OS-HbUwa19XwA6t-qHm1aZ3g7uNnD8ttS__3s5ai4PAzBGeEfUhIV6OyZbVx7MzoJuJIJiD1N_jSFQ6G88DYyE'
-        },
-        updates: [
-            {
-                user: 'Marco Rivera',
-                role: 'Senior Tech',
-                time: 'Today, 2:45 PM',
-                content: 'Disassembled the chassis and confirmed physical damage to the PCIe slot. Replacement part #P-992-B has been ordered from the central warehouse. Work will resume once the part arrives.',
-                isSystem: false,
-                image: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAC4fIqiBp65HCyIllDM-TH-1GTJ2rxHurVBAL9b6h9ykj-1bFH0oVwXDcY5fKY-oHBX_Z5iiKjqAQFheNGNyfnKQbUNd7mWgrMDdUjU3drPYqLvDESeGjsen2GBhKsY2YNfoYnBn-STY_I3ZqvQ1MxbfUVtZ3tAYmj77SpVmMNPaZGPxPTb1ri9mhPDGvD-G5ygMUEO3ed5ouRx8DCDHDrrBUvgxkOhNYzLWHHJefPI6E7EWqP0qnN33-dlg7mgnCgDmnAqGPcy_E'
-            },
-            {
-                user: 'System Automator',
-                role: '',
-                time: 'Oct 25, 10:15 AM',
-                content: 'Ticket status changed from Issued to Being Treated. Assigned to Marco Rivera.',
-                isSystem: true
-            },
-            {
-                user: 'Ticket Created',
-                role: '',
-                time: 'Oct 24, 10:00 AM',
-                content: 'Initial submission: Hardware failure, workstation does not boot.',
-                isSystem: true
+    const [ticket, setTicket] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [comment, setComment] = useState('');
+    const [deleting, setDeleting] = useState(false);
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [notifications, setNotifications] = useState([]);
+    const [unreadCount, setUnreadCount] = useState(0);
+    const [showNotifications, setShowNotifications] = useState(false);
+    const [previousStatus, setPreviousStatus] = useState(null);
+    const [notificationToast, setNotificationToast] = useState(null);
+
+    useEffect(() => {
+        loadTicket();
+        const pollInterval = setInterval(checkForUpdates, 5000); // Poll every 5 seconds
+        return () => clearInterval(pollInterval);
+    }, [ticketId]);
+
+    const loadTicket = async () => {
+        try {
+            setLoading(true);
+            setError(null);
+            const data = await getClientTicket(ticketId);
+            setTicket(data);
+            if (data.status && !previousStatus) {
+                setPreviousStatus(data.status);
             }
-        ]
+        } catch (err) {
+            console.error('Error loading ticket:', err);
+            setError('Failed to load ticket details');
+        } finally {
+            setLoading(false);
+        }
     };
 
-    const [comment, setComment] = useState('');
+    const checkForUpdates = async () => {
+        try {
+            const data = await getClientTicket(ticketId);
+            if (ticket && data.status !== ticket.status) {
+                // Status changed, add notification
+                const newNotification = {
+                    id: Date.now(),
+                    type: 'status_change',
+                    title: 'Ticket Status Updated',
+                    message: `Status changed from ${ticket.status} to ${data.status}`,
+                    timestamp: new Date(),
+                    read: false,
+                    oldStatus: ticket.status,
+                    newStatus: data.status
+                };
+                setNotifications(prev => [newNotification, ...prev]);
+                setUnreadCount(prev => prev + 1);
+                setNotificationToast(newNotification);
+                setTimeout(() => setNotificationToast(null), 5000);
+            } else if (ticket && data.employee && !ticket.employee && data.id_employee) {
+                // Ticket was assigned
+                const newNotification = {
+                    id: Date.now(),
+                    type: 'assignment',
+                    title: 'Ticket Assigned',
+                    message: `Your ticket has been assigned to ${data.employee.name}`,
+                    timestamp: new Date(),
+                    read: false
+                };
+                setNotifications(prev => [newNotification, ...prev]);
+                setUnreadCount(prev => prev + 1);
+                setNotificationToast(newNotification);
+                setTimeout(() => setNotificationToast(null), 5000);
+            }
+            setTicket(data);
+        } catch (err) {
+            console.error('Error checking for updates:', err);
+        }
+    };
+
+    const markAsRead = (notifId) => {
+        setNotifications(prev => prev.map(n => n.id === notifId ? { ...n, read: true } : n));
+        setUnreadCount(prev => Math.max(0, prev - 1));
+    };
+
+    const handleDeleteTicket = async () => {
+        try {
+            setDeleting(true);
+            await deleteTicket(ticketId);
+            setShowDeleteConfirm(false);
+            // Navigate back after deletion
+            setTimeout(() => onBack(), 500);
+        } catch (err) {
+            console.error('Error deleting ticket:', err);
+            setError('Failed to delete ticket');
+        } finally {
+            setDeleting(false);
+        }
+    };
+
+    if (loading) {
+        return (
+            <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex items-center justify-center">
+                <div className="text-center">
+                    <div className="animate-spin mb-4">
+                        <span className="material-symbols-outlined text-4xl text-primary">refresh</span>
+                    </div>
+                    <p className="text-slate-500">Loading ticket details...</p>
+                </div>
+            </div>
+        );
+    }
+
+    if (error || !ticket) {
+        return (
+            <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex items-center justify-center">
+                <div className="text-center bg-white dark:bg-surface-dark rounded-xl p-8 max-w-md">
+                    <span className="material-symbols-outlined text-4xl text-red-500 mb-4 block">error</span>
+                    <p className="text-slate-600 dark:text-slate-300 mb-6">{error || 'Ticket not found'}</p>
+                    <button 
+                        onClick={onBack}
+                        className="px-6 py-2 bg-primary text-white rounded-lg font-bold hover:bg-orange-600 transition-colors"
+                    >
+                        Back to Dashboard
+                    </button>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen">
+            {/* Toast Notification */}
+            {notificationToast && (
+                <div className="fixed top-4 right-4 z-[60] animate-in fade-in slide-in-from-top">
+                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-lg shadow-xl p-4 max-w-sm">
+                        <div className="flex items-start gap-3">
+                            <div className="flex-shrink-0 mt-0.5">
+                                {notificationToast.type === 'status_change' && (
+                                    <span className="material-symbols-outlined text-amber-500 text-xl">update</span>
+                                )}
+                                {notificationToast.type === 'assignment' && (
+                                    <span className="material-symbols-outlined text-emerald-500 text-xl">person_add</span>
+                                )}
+                            </div>
+                            <div className="flex-1">
+                                <p className="font-bold text-slate-900 dark:text-white text-sm">{notificationToast.title}</p>
+                                <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">{notificationToast.message}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {/* Delete Confirmation Modal */}
+            {showDeleteConfirm && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-surface-dark rounded-xl p-6 max-w-sm shadow-2xl">
+                        <div className="flex items-center justify-center w-12 h-12 rounded-full bg-red-100 dark:bg-red-900/30 mx-auto mb-4">
+                            <span className="material-symbols-outlined text-red-600 dark:text-red-400">warning</span>
+                        </div>
+                        <h3 className="text-lg font-bold text-center mb-2">Delete Ticket?</h3>
+                        <p className="text-center text-slate-600 dark:text-slate-300 text-sm mb-6">
+                            Are you sure you want to delete ticket <span className="font-bold">#{ticket.id}</span>? This action cannot be undone.
+                        </p>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => setShowDeleteConfirm(false)}
+                                disabled={deleting}
+                                className="flex-1 px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg font-bold text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleDeleteTicket}
+                                disabled={deleting}
+                                className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                            >
+                                {deleting ? (
+                                    <>
+                                        <span className="animate-spin">⟳</span> Deleting...
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="material-symbols-outlined text-sm">delete</span> Delete
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
 
             {/* Top Navigation Bar */}
@@ -59,8 +204,6 @@ export function TicketTracking({ ticketId, onBack }) {
                         <nav className="hidden md:flex items-center gap-6">
                             <a onClick={onBack} className="text-sm font-medium hover:text-primary transition-colors cursor-pointer" href="#">Dashboard</a>
                             <a className="text-sm font-medium text-primary" href="#">My Tickets</a>
-                            <a className="text-sm font-medium hover:text-primary transition-colors cursor-pointer" href="#">Service Catalog</a>
-                            <a className="text-sm font-medium hover:text-primary transition-colors cursor-pointer" href="#">Knowledge Base</a>
                         </nav>
                     </div>
                     <div className="flex items-center gap-4">
@@ -68,7 +211,76 @@ export function TicketTracking({ ticketId, onBack }) {
                             <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xl">search</span>
                             <input className="bg-slate-100 dark:bg-slate-800 border-none rounded-lg pl-10 pr-4 py-2 text-sm w-64 focus:ring-2 focus:ring-primary" placeholder="Search tickets..." type="text" />
                         </div>
-                        <button className="material-symbols-outlined p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors">notifications</button>
+                        <div className="relative">
+                            <button 
+                                onClick={() => setShowNotifications(!showNotifications)}
+                                className="material-symbols-outlined p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors relative"
+                            >
+                                notifications
+                                {unreadCount > 0 && (
+                                    <span className="absolute top-0 right-0 bg-red-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                                        {unreadCount > 9 ? '9+' : unreadCount}
+                                    </span>
+                                )}
+                            </button>
+
+                            {/* Notification Dropdown */}
+                            {showNotifications && (
+                                <div className="absolute right-0 mt-2 w-80 bg-white dark:bg-surface-dark rounded-lg shadow-2xl border border-slate-200 dark:border-border-dark z-50 max-h-96 overflow-y-auto">
+                                    <div className="p-4 border-b border-slate-200 dark:border-border-dark sticky top-0 bg-white dark:bg-surface-dark">
+                                        <div className="flex items-center justify-between">
+                                            <h3 className="font-bold text-slate-900 dark:text-white">Notifications</h3>
+                                            {unreadCount > 0 && (
+                                                <span className="bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-xs font-bold px-2 py-1 rounded">
+                                                    {unreadCount} new
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                                        {notifications.length > 0 ? (
+                                            notifications.map(notif => (
+                                                <div 
+                                                    key={notif.id}
+                                                    onClick={() => markAsRead(notif.id)}
+                                                    className={`p-4 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-750 transition-colors ${
+                                                        !notif.read ? 'bg-blue-50 dark:bg-blue-900/10' : ''
+                                                    }`}
+                                                >
+                                                    <div className="flex items-start gap-3">
+                                                        <div className="flex-shrink-0 mt-1">
+                                                            {notif.type === 'status_change' && (
+                                                                <span className="material-symbols-outlined text-amber-500 text-xl">update</span>
+                                                            )}
+                                                            {notif.type === 'assignment' && (
+                                                                <span className="material-symbols-outlined text-emerald-500 text-xl">person_add</span>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex items-center justify-between">
+                                                                <p className="font-bold text-slate-900 dark:text-white text-sm">{notif.title}</p>
+                                                                {!notif.read && (
+                                                                    <div className="w-2 h-2 bg-red-500 rounded-full flex-shrink-0 ml-2"></div>
+                                                                )}
+                                                            </div>
+                                                            <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">{notif.message}</p>
+                                                            <p className="text-xs text-slate-400 dark:text-slate-500 mt-2">
+                                                                {notif.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))
+                                        ) : (
+                                            <div className="p-8 text-center">
+                                                <span className="material-symbols-outlined text-slate-300 dark:text-slate-600 text-3xl block mb-2">notifications_none</span>
+                                                <p className="text-sm text-slate-500 dark:text-slate-400">No notifications yet</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                         <div className="h-10 w-10 rounded-full bg-primary/20 border-2 border-primary overflow-hidden">
                             <img alt="User Profile" className="h-full w-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAgBkMOQo3JQUyvxQ-Hf0n73YGF5kn0kRJb7NrPOWdlPuK0AYO0o8X4LiRlWHJzfz2JxPaxOrZ3uApgaa8e7SMR01ptXIDp9ubmdK5cCv2xA2Rk292IpM89skZK6ZV0JoD58ShKvupiRdP_aUiIDd2j1hvcd_UEGYUmikjt3RgID9CYWFeAclGvEhDYMOmOn5FSlKLL-Mpcpidq3kEUGSS1r2jjAsRY66e5_rSZhZy0q4OascgUdXYxOph2Nr7nKtxQnVuTn5eNfNc" />
                         </div>
@@ -87,7 +299,9 @@ export function TicketTracking({ ticketId, onBack }) {
                         </nav>
                         <h1 className="text-3xl font-extrabold flex items-center gap-3">
                             Ticket #{ticket.id}
-                            <span className="bg-primary/10 text-primary text-xs font-bold px-2.5 py-1 rounded uppercase tracking-wider border border-primary/20">{ticket.status}</span>
+                            <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 text-xs font-bold px-2.5 py-1 rounded uppercase tracking-wider border border-blue-200 dark:border-blue-800">
+                                {ticket.status || 'Open'}
+                            </span>
                         </h1>
                     </div>
                     <div className="flex gap-3">
@@ -96,6 +310,12 @@ export function TicketTracking({ ticketId, onBack }) {
                         </button>
                         <button className="flex items-center gap-2 px-4 py-2 bg-primary hover:bg-orange-600 text-white rounded-lg text-sm font-bold transition-colors shadow-lg shadow-primary/20">
                             <span className="material-symbols-outlined text-lg">chat</span> Contact Technician
+                        </button>
+                        <button 
+                            onClick={() => setShowDeleteConfirm(true)}
+                            className="flex items-center gap-2 px-4 py-2 bg-red-100 dark:bg-red-900/30 hover:bg-red-200 dark:hover:bg-red-900/50 text-red-600 dark:text-red-400 rounded-lg text-sm font-bold transition-colors"
+                        >
+                            <span className="material-symbols-outlined text-lg">delete</span> Delete Ticket
                         </button>
                     </div>
                 </div>
@@ -106,56 +326,102 @@ export function TicketTracking({ ticketId, onBack }) {
                         {/* Timeline Tracking Interface */}
                         <section className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-8 shadow-sm">
                             <h3 className="text-lg font-bold mb-8 flex items-center gap-2">
-                                <span className="material-symbols-outlined text-primary">route</span> Live Progress Tracking
+                                <span className="material-symbols-outlined text-primary">route</span> Ticket Status
                             </h3>
-                            <div className="relative flex justify-between">
-                                {/* Connecting Line Background */}
-                                <div className="absolute top-5 left-0 w-full h-1 bg-slate-200 dark:bg-slate-700 -z-0"></div>
-                                {/* Active Line Overlay */}
-                                <div className="absolute top-5 left-0 w-1/2 h-1 bg-primary -z-0"></div>
+                            
+                            <div className="space-y-6">
+                                {/* Workflow Progress */}
+                                <div className="p-6 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                    <p className="text-sm font-bold text-blue-600 dark:text-blue-400 mb-4 uppercase tracking-wide">Workflow Progress</p>
+                                    <div className="space-y-4">
+                                        {/* Stage 1: Open */}
+                                        <div className="flex items-center gap-4">
+                                            <div className={`flex items-center justify-center h-10 w-10 rounded-full font-bold text-sm transition-all ${
+                                                ticket.status !== undefined ? 'bg-emerald-500 text-white' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                                            }`}>
+                                                <span className="material-symbols-outlined text-lg">task_alt</span>
+                                            </div>
+                                            <div className="flex-1">
+                                                <p className="font-bold text-sm text-slate-900 dark:text-white">Submitted</p>
+                                                <p className="text-xs text-slate-500 dark:text-slate-400">{new Date(ticket.created_at).toLocaleDateString()}</p>
+                                            </div>
+                                        </div>
 
-                                {/* Step 1: Issued */}
-                                <div className="relative z-10 flex flex-col items-center group">
-                                    <div className="h-10 w-10 rounded-full bg-primary text-white flex items-center justify-center shadow-lg shadow-primary/30">
-                                        <span className="material-symbols-outlined font-variation-settings-fill">check_circle</span>
+                                        {/* Connector Line */}
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-10 flex justify-center">
+                                                <div className={`w-1 h-6 ${
+                                                    ticket.status === 'in progress' || ticket.status === 'in-progress' || ticket.status === 'resolved' 
+                                                        ? 'bg-amber-500' 
+                                                        : 'bg-slate-200 dark:bg-slate-700'
+                                                }`}></div>
+                                            </div>
+                                        </div>
+
+                                        {/* Stage 2: In Progress */}
+                                        <div className="flex items-center gap-4">
+                                            <div className={`flex items-center justify-center h-10 w-10 rounded-full font-bold text-sm transition-all ${
+                                                ticket.status === 'in progress' || ticket.status === 'in-progress' || ticket.status === 'resolved' 
+                                                    ? 'bg-amber-500 text-white' 
+                                                    : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                                            }`}>
+                                                <span className="material-symbols-outlined text-lg">construction</span>
+                                            </div>
+                                            <div className="flex-1">
+                                                <p className="font-bold text-sm text-slate-900 dark:text-white">In Progress</p>
+                                                <p className="text-xs text-slate-500 dark:text-slate-400">Work being handled</p>
+                                            </div>
+                                        </div>
+
+                                        {/* Connector Line */}
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-10 flex justify-center">
+                                                <div className={`w-1 h-6 ${
+                                                    ticket.status === 'resolved' 
+                                                        ? 'bg-emerald-500' 
+                                                        : 'bg-slate-200 dark:bg-slate-700'
+                                                }`}></div>
+                                            </div>
+                                        </div>
+
+                                        {/* Stage 3: Resolved */}
+                                        <div className="flex items-center gap-4">
+                                            <div className={`flex items-center justify-center h-10 w-10 rounded-full font-bold text-sm transition-all ${
+                                                ticket.status === 'resolved' 
+                                                    ? 'bg-emerald-500 text-white' 
+                                                    : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                                            }`}>
+                                                <span className="material-symbols-outlined text-lg">check_circle</span>
+                                            </div>
+                                            <div className="flex-1">
+                                                <p className="font-bold text-sm text-slate-900 dark:text-white">Resolved</p>
+                                                {ticket.end_at && (
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400">{new Date(ticket.end_at).toLocaleDateString()}</p>
+                                                )}
+                                            </div>
+                                        </div>
                                     </div>
-                                    <p className="mt-3 font-bold text-sm">Issued</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400">Oct 24, 10:00 AM</p>
                                 </div>
 
-                                {/* Step 2: Being Treated */}
-                                <div className="relative z-10 flex flex-col items-center group">
-                                    <div className="h-10 w-10 rounded-full bg-primary text-white flex items-center justify-center shadow-lg shadow-primary/30 ring-4 ring-primary/20 animate-pulse">
-                                        <span className="material-symbols-outlined">engineering</span>
+                                {/* Status Summary */}
+                                <div className="p-6 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <p className="text-sm text-blue-600 dark:text-blue-400 font-medium mb-1">Current Status</p>
+                                            <p className="text-2xl font-bold text-slate-900 dark:text-white capitalize">
+                                                {ticket.status === 'open' ? 'Open' : 
+                                                 ticket.status === 'in progress' ? 'In Progress' : 
+                                                 ticket.status === 'in-progress' ? 'In Progress' :
+                                                 ticket.status === 'resolved' ? 'Resolved' : ticket.status}
+                                            </p>
+                                        </div>
+                                        <div className="text-right">
+                                            <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">Created</p>
+                                            <p className="text-lg font-medium text-slate-900 dark:text-white">
+                                                {new Date(ticket.created_at).toLocaleDateString()}
+                                            </p>
+                                        </div>
                                     </div>
-                                    <p className="mt-3 font-bold text-sm text-primary">Being Treated</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400">Oct 25, 02:30 PM</p>
-                                </div>
-
-                                {/* Step 3: Quality Check */}
-                                <div className="relative z-10 flex flex-col items-center group">
-                                    <div className="h-10 w-10 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-400 dark:text-slate-500 flex items-center justify-center">
-                                        <span className="material-symbols-outlined">verified</span>
-                                    </div>
-                                    <p className="mt-3 font-bold text-sm text-slate-400">Verification</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400">Pending</p>
-                                </div>
-
-                                {/* Step 4: Resolved */}
-                                <div className="relative z-10 flex flex-col items-center group">
-                                    <div className="h-10 w-10 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-400 dark:text-slate-500 flex items-center justify-center">
-                                        <span className="material-symbols-outlined">task_alt</span>
-                                    </div>
-                                    <p className="mt-3 font-bold text-sm text-slate-400">Resolved</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400">Expected: Oct 27</p>
-                                </div>
-                            </div>
-
-                            <div className="mt-12 p-4 bg-primary/5 border border-primary/20 rounded-lg flex items-start gap-4">
-                                <span className="material-symbols-outlined text-primary">info</span>
-                                <div>
-                                    <p className="text-sm font-semibold">Current Update: Technician Diagnosing Motherboard</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Our Senior Technician is currently running diagnostics on the power supply module. Estimated completion of this phase is 2 hours.</p>
                                 </div>
                             </div>
                         </section>
@@ -163,38 +429,25 @@ export function TicketTracking({ ticketId, onBack }) {
                         {/* Activity Feed & Technician Notes */}
                         <section className="space-y-6">
                             <h3 className="text-lg font-bold flex items-center gap-2">
-                                <span className="material-symbols-outlined text-primary">history</span> Activity Log & Technician Notes
+                                <span className="material-symbols-outlined text-primary">history</span> Activity Log
                             </h3>
                             <div className="space-y-4">
-                                {ticket.updates.map((update, idx) => (
-                                    <div key={idx} className="flex gap-4">
-                                        <div className="flex flex-col items-center">
-                                            <div className={`w-2.5 h-2.5 rounded-full mt-2 ${idx === 0 ? 'bg-primary' : 'bg-slate-300 dark:bg-slate-600'}`}></div>
-                                            {idx !== ticket.updates.length - 1 && <div className="w-0.5 h-full bg-slate-200 dark:bg-slate-700"></div>}
-                                        </div>
-                                        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-5 flex-1 shadow-sm">
-                                            <div className="flex justify-between items-start mb-2">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="font-bold">{update.user}</span>
-                                                    {update.role && (
-                                                        <span className="text-[10px] bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded text-slate-500 uppercase tracking-tighter">{update.role}</span>
-                                                    )}
-                                                </div>
-                                                <span className="text-xs text-slate-500 dark:text-slate-400">{update.time}</span>
-                                            </div>
-                                            <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
-                                                {update.content}
-                                            </p>
-                                            {update.image && (
-                                                <div className="mt-4 flex gap-2">
-                                                    <div className="h-16 w-24 bg-slate-100 dark:bg-slate-800 rounded border border-slate-200 dark:border-border-dark overflow-hidden cursor-zoom-in">
-                                                        <img alt="Hardware Photo" className="w-full h-full object-cover opacity-80 hover:opacity-100 transition-opacity" src={update.image} />
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
+                                <div className="flex gap-4">
+                                    <div className="flex flex-col items-center">
+                                        <div className="w-2.5 h-2.5 rounded-full mt-2 bg-primary"></div>
                                     </div>
-                                ))}
+                                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-5 flex-1 shadow-sm">
+                                        <div className="flex justify-between items-start mb-2">
+                                            <span className="font-bold">Ticket Created</span>
+                                            <span className="text-xs text-slate-500 dark:text-slate-400">
+                                                {new Date(ticket.created_at).toLocaleString()}
+                                            </span>
+                                        </div>
+                                        <p className="text-sm text-slate-600 dark:text-slate-300">
+                                            {ticket.titre}
+                                        </p>
+                                    </div>
+                                </div>
                             </div>
 
                             {/* Client Reply Area */}
@@ -221,67 +474,108 @@ export function TicketTracking({ ticketId, onBack }) {
                             <div className="space-y-4">
                                 <div className="flex justify-between items-center text-sm">
                                     <span className="text-slate-500 dark:text-slate-400">Priority</span>
-                                    <span className="px-2 py-0.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-xs font-bold uppercase">{ticket.priority}</span>
+                                    <span className="px-2 py-0.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-xs font-bold uppercase">
+                                        {ticket.priority || 'Medium'}
+                                    </span>
                                 </div>
                                 <div className="flex justify-between items-center text-sm">
-                                    <span className="text-slate-500 dark:text-slate-400">Category</span>
-                                    <span className="font-medium">{ticket.category}</span>
+                                    <span className="text-slate-500 dark:text-slate-400">Title</span>
+                                    <span className="font-medium text-right">{ticket.titre}</span>
                                 </div>
                                 <div className="flex justify-between items-center text-sm">
-                                    <span className="text-slate-500 dark:text-slate-400">Workstation ID</span>
-                                    <span className="font-medium">{ticket.workstationId}</span>
+                                    <span className="text-slate-500 dark:text-slate-400">Machine</span>
+                                    <span className="font-medium text-right">
+                                        {ticket.machine?.nom_poste || 'N/A'}
+                                    </span>
                                 </div>
                                 <div className="flex justify-between items-center text-sm">
-                                    <span className="text-slate-500 dark:text-slate-400">SLA Timer</span>
-                                    <span className="font-bold text-primary">{ticket.slaRemaining} remaining</span>
+                                    <span className="text-slate-500 dark:text-slate-400">Created</span>
+                                    <span className="font-medium text-right">
+                                        {new Date(ticket.created_at).toLocaleDateString()}
+                                    </span>
                                 </div>
                             </div>
                         </div>
 
-                        {/* Assigned Technician */}
+                        {/* Assigned Technician with Progress */}
                         <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-6 shadow-sm">
                             <h4 className="font-bold mb-4 uppercase text-xs text-slate-400 tracking-widest">Assigned Technician</h4>
-                            <div className="flex items-center gap-4 mb-4">
-                                <div className="h-12 w-12 rounded-full overflow-hidden bg-slate-200">
-                                    <img alt="Technician" className="h-full w-full object-cover" src={ticket.technician.avatar} />
+                            {ticket.employee ? (
+                                <>
+                                    {/* Progress Bar with Agent Name */}
+                                    <div className="mb-6">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className="material-symbols-outlined text-primary text-lg">person</span>
+                                                <span className="font-bold text-sm text-slate-900 dark:text-white">{ticket.employee.name}</span>
+                                            </div>
+                                            <span className="text-xs font-bold text-slate-500 dark:text-slate-400">
+                                                {ticket.status === 'open' ? '0%' : 
+                                                 ticket.status === 'in progress' || ticket.status === 'in-progress' ? '50%' : 
+                                                 ticket.status === 'resolved' ? '100%' : '0%'}
+                                            </span>
+                                        </div>
+                                        <div className="w-full h-3 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden border border-slate-200 dark:border-slate-700">
+                                            <div 
+                                                className={`h-full rounded-full transition-all duration-500 ${
+                                                    ticket.status === 'resolved' ? 'bg-emerald-500' :
+                                                    ticket.status === 'in progress' || ticket.status === 'in-progress' ? 'bg-amber-500' :
+                                                    'bg-slate-300'
+                                                }`}
+                                                style={{
+                                                    width: ticket.status === 'open' ? '0%' : 
+                                                           ticket.status === 'in progress' || ticket.status === 'in-progress' ? '50%' : 
+                                                           ticket.status === 'resolved' ? '100%' : '0%'
+                                                }}
+                                            ></div>
+                                        </div>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                            {ticket.status === 'open' ? 'Pending Assignment' : 
+                                             ticket.status === 'in progress' || ticket.status === 'in-progress' ? 'Work in Progress' : 
+                                             ticket.status === 'resolved' ? 'Completed' : 'Processing'}
+                                        </p>
+                                    </div>
+
+                                    <div className="flex items-center gap-4 mb-4">
+                                        <div className="h-12 w-12 rounded-full overflow-hidden bg-primary/20 border-2 border-primary flex items-center justify-center shrink-0">
+                                            <span className="material-symbols-outlined text-primary">person</span>
+                                        </div>
+                                        <div>
+                                            <p className="font-bold">{ticket.employee.name}</p>
+                                            <p className="text-xs text-slate-500 dark:text-slate-400">Technician</p>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button className="p-2 border border-slate-200 dark:border-border-dark rounded-lg flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
+                                            <span className="material-symbols-outlined text-xl">call</span>
+                                        </button>
+                                        <button className="p-2 border border-slate-200 dark:border-border-dark rounded-lg flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
+                                            <span className="material-symbols-outlined text-xl">mail</span>
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="text-center py-6">
+                                    <span className="material-symbols-outlined text-4xl text-slate-300 dark:text-slate-600 block mb-2">person_off</span>
+                                    <p className="text-sm text-slate-500 dark:text-slate-400">No technician assigned yet</p>
                                 </div>
-                                <div>
-                                    <p className="font-bold">{ticket.technician.name}</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400">{ticket.technician.role}</p>
-                                </div>
-                            </div>
-                            <div className="grid grid-cols-2 gap-2">
-                                <button className="p-2 border border-slate-200 dark:border-border-dark rounded-lg flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
-                                    <span className="material-symbols-outlined text-xl">call</span>
-                                </button>
-                                <button className="p-2 border border-slate-200 dark:border-border-dark rounded-lg flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
-                                    <span className="material-symbols-outlined text-xl">mail</span>
-                                </button>
-                            </div>
+                            )}
                         </div>
 
                         {/* Attachments */}
                         <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-6 shadow-sm">
-                            <h4 className="font-bold mb-4 uppercase text-xs text-slate-400 tracking-widest">Attachments (3)</h4>
-                            <div className="space-y-2">
-                                <div className="flex items-center justify-between p-2 bg-slate-50 dark:bg-slate-800/50 rounded-lg group">
-                                    <div className="flex items-center gap-3 overflow-hidden">
-                                        <span className="material-symbols-outlined text-primary">image</span>
-                                        <span className="text-xs font-medium truncate">damage_report_1.jpg</span>
+                            <h4 className="font-bold mb-4 uppercase text-xs text-slate-400 tracking-widest">Description</h4>
+                            <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed mb-4">
+                                {ticket.description}
+                            </p>
+                            {ticket.image && (
+                                <div className="mt-4">
+                                    <p className="text-xs text-slate-500 mb-2">Attached Image</p>
+                                    <div className="h-40 bg-slate-100 dark:bg-slate-800 rounded border border-slate-200 dark:border-border-dark overflow-hidden">
+                                        <img alt="Ticket attachment" className="w-full h-full object-cover" src={`/storage/${ticket.image}`} />
                                     </div>
-                                    <button className="material-symbols-outlined text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">download</button>
                                 </div>
-                                <div className="flex items-center justify-between p-2 bg-slate-50 dark:bg-slate-800/50 rounded-lg group">
-                                    <div className="flex items-center gap-3 overflow-hidden">
-                                        <span className="material-symbols-outlined text-primary">description</span>
-                                        <span className="text-xs font-medium truncate">diagnostics.pdf</span>
-                                    </div>
-                                    <button className="material-symbols-outlined text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">download</button>
-                                </div>
-                                <button className="w-full mt-4 py-2 border-2 border-dashed border-slate-200 dark:border-border-dark rounded-lg text-xs font-bold text-slate-500 flex items-center justify-center gap-2 hover:border-primary hover:text-primary transition-all">
-                                    <span className="material-symbols-outlined text-sm">add_circle</span> Upload File
-                                </button>
-                            </div>
+                            )}
                         </div>
 
                         {/* Support Shortcut */}

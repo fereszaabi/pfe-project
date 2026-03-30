@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Shield, Users, Ticket, Activity, TrendingUp, LogOut, User, Clock } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney } from '../../services/api';
+import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard } from '../../services/api';
 
 export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const [activeTab, setActiveTab] = useState(activeView || 'overview');
@@ -10,14 +10,16 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const [selectedClient, setSelectedClient] = useState(null);
     const [tickets, setTickets] = useState([]);
     const [stats, setStats] = useState({ total: 0, by_status: {} });
+    const [leaderboard, setLeaderboard] = useState([]);
     const [loading, setLoading] = useState(true);
 
     const fetchData = () => {
         setLoading(true);
-        Promise.all([getAdminDemandes(), getAdminStats()])
-            .then(([demandesData, statsData]) => {
+        Promise.all([getAdminDemandes(), getAdminStats(), getEmployeeLeaderboard(10)])
+            .then(([demandesData, statsData, leaderboardData]) => {
                 setTickets(Array.isArray(demandesData) ? demandesData : demandesData.data ?? []);
                 setStats(statsData);
+                setLeaderboard(leaderboardData?.leaderboard ?? []);
             })
             .catch(() => {})
             .finally(() => setLoading(false));
@@ -68,6 +70,13 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const escalatedTickets = tickets.filter(t => t.status === 'tech').length;
     const resolutionRate = totalTickets > 0 ? Math.round((resolvedTickets / totalTickets) * 100) : 0;
 
+    // Get top performer from leaderboard
+    const topPerformer = leaderboard.length > 0 ? {
+        employee: { nom: leaderboard[0].name },
+        resolved: leaderboard[0].tickets_completed,
+        avg_rating: leaderboard[0].avg_rating
+    } : null;
+
     // Keep mock chart data (no chart endpoint on backend)
     const ticketTrendData = [
         { date: '2/1', submitted: 12, resolved: 8 },
@@ -78,6 +87,36 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
         { date: '2/6', submitted: 20, resolved: 18 },
         { date: '2/7', submitted: 16, resolved: 15 },
     ];
+
+    // employee response times chart data
+    const getEmployeeResponseTimesData = () => {
+        return leaderboard.slice(0, 5).map(emp => ({
+            name: emp.name.split(' ')[0],
+            responseTime: emp.avg_resolution_hours || 0,
+            rating: emp.avg_rating || 0
+        }));
+    };
+
+    // priority breakdown chart data
+    const getPriorityBreakdownData = () => {
+        return [
+            { name: 'Urgent', value: tickets.filter(t => t.priority === 'urgent').length },
+            { name: 'High', value: tickets.filter(t => t.priority === 'high').length },
+            { name: 'Medium', value: tickets.filter(t => t.priority === 'medium').length },
+            { name: 'Low', value: tickets.filter(t => t.priority === 'low').length }
+        ].filter(item => item.value > 0);
+    };
+
+    //  traffic stats chart data (by status)
+    const getTrafficStatsData = () => {
+        return [
+            { name: 'Submitted', value: tickets.filter(t => t.status === 'submitted').length },
+            { name: 'Assigned', value: tickets.filter(t => t.status === 'assigned').length },
+            { name: 'In Progress', value: tickets.filter(t => ['in-progress', 'in progress'].includes(t.status)).length },
+            { name: 'Resolved', value: tickets.filter(t => t.status === 'resolved').length },
+            { name: 'Escalated', value: tickets.filter(t => t.status === 'tech').length }
+        ].filter(item => item.value > 0);
+    };
 
     const getStatusColor = (status) => {
         switch (status) {
@@ -279,7 +318,7 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                         </div>
                                     </div>
                                     <div className="flex items-end gap-3 text-slate-900 dark:text-white">
-                                        <h3 className="text-3xl font-bold">{users.length}</h3>
+                                        <h3 className="text-3xl font-bold">{leaderboard.length}</h3>
                                         <span className="text-slate-400 text-xs font-bold mb-1">Stable</span>
                                     </div>
                                 </div>
@@ -333,6 +372,10 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                                     </div>
                                                     <span className="text-sm font-bold text-slate-900 dark:text-white leading-tight">{topPerformer.employee?.nom || 'Unknown'}</span>
                                                     <span className="text-[10px] text-emerald-500 font-bold mt-0.5">{topPerformer.resolved} solved</span>
+                                                    <div className="flex items-center gap-1 mt-2">
+                                                        <span className="material-symbols-outlined text-sm text-yellow-500">star</span>
+                                                        <span className="text-[10px] font-bold text-slate-900 dark:text-white">{(topPerformer.avg_rating ?? 0).toFixed(1)}/5</span>
+                                                    </div>
                                                 </>
                                             ) : (
                                                 <span className="text-xs text-slate-400">No data yet</span>
@@ -364,7 +407,94 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                 </div>
                             </div>
 
-                            {/* Recently Administered Interaction Log Table */}
+                            {/* Employee Performance Charts */}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8">
+                                {/* Employee Response Times */}
+                                <div className="bg-white dark:bg-midnight-accent p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+                                    <h3 className="font-bold text-slate-900 dark:text-white mb-6">Employee Response Times</h3>
+                                    <div className="h-[250px] w-full">
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <BarChart data={getEmployeeResponseTimesData()}>
+                                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                                                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                                                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                                                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
+                                                <Legend />
+                                                <Bar dataKey="responseTime" fill="#3b82f6" name="Avg Hours" radius={[8, 8, 0, 0]} />
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                </div>
+
+                                {/* Traffic Stats by Status */}
+                                <div className="bg-white dark:bg-midnight-accent p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+                                    <h3 className="font-bold text-slate-900 dark:text-white mb-6">Traffic Stats</h3>
+                                    <div className="h-[250px] w-full">
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <BarChart data={getTrafficStatsData()}>
+                                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                                                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} angle={-45} textAnchor="end" height={80} />
+                                                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                                                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
+                                                <Bar dataKey="value" fill="#f96f06" radius={[8, 8, 0, 0]} />
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                </div>
+
+                                {/* Most Common Problems */}
+                                <div className="bg-white dark:bg-midnight-accent p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm lg:col-span-2">
+                                    <h3 className="font-bold text-slate-900 dark:text-white mb-6">Most Common Problems (Priority Distribution)</h3>
+                                    <div className="h-[250px] w-full">
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <BarChart data={getPriorityBreakdownData()} layout="vertical" margin={{ left: 80 }}>
+                                                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                                                <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                                                <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                                                <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
+                                                <Bar dataKey="value" fill="#ef4444" radius={[0, 8, 8, 0]} />
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                </div>
+
+                                {/* Top Employees Table */}
+                                <div className="bg-white dark:bg-midnight-accent p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm lg:col-span-2">
+                                    <h3 className="font-bold text-slate-900 dark:text-white mb-6">Top Performing Employees</h3>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead>
+                                                <tr className="border-b border-slate-200 dark:border-slate-700">
+                                                    <th className="text-left py-3 px-3 font-bold text-slate-600 dark:text-slate-400">Employee</th>
+                                                    <th className="text-center py-3 px-3 font-bold text-slate-600 dark:text-slate-400">Tickets</th>
+                                                    <th className="text-center py-3 px-3 font-bold text-slate-600 dark:text-slate-400">Avg Rating</th>
+                                                    <th className="text-center py-3 px-3 font-bold text-slate-600 dark:text-slate-400">Response Time</th>
+                                                    <th className="text-center py-3 px-3 font-bold text-slate-600 dark:text-slate-400">Workload</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {leaderboard.slice(0, 5).map((emp, idx) => (
+                                                    <tr key={idx} className="border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/20 transition-colors">
+                                                        <td className="py-3 px-3 font-medium text-slate-900 dark:text-white">{emp.name}</td>
+                                                        <td className="py-3 px-3 text-center text-slate-600 dark:text-slate-400">{emp.tickets_completed}</td>
+                                                        <td className="py-3 px-3 text-center">
+                                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 font-bold text-xs">
+                                                                ⭐ {(emp.avg_rating ?? 0).toFixed(1)}
+                                                            </span>
+                                                        </td>
+                                                        <td className="py-3 px-3 text-center text-slate-600 dark:text-slate-400">{(emp.avg_resolution_hours ?? 0).toFixed(1)}h</td>
+                                                        <td className="py-3 px-3 text-center">
+                                                            <span className={`inline-flex items-center justify-center px-2 py-1 rounded-full text-xs font-bold ${emp.current_workload > 5 ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400' : 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'}`}>
+                                                                {emp.current_workload} tickets
+                                                            </span>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
                             <div className="bg-white dark:bg-midnight-accent rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col">
                                 <div className="px-8 py-6 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
                                     <div className="flex items-center gap-3">
