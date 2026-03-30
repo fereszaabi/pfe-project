@@ -6,6 +6,7 @@ import { ClientProfile } from './components/ClientProfile';
 import { EmployeeDashboard } from './components/EmployeeDashboard';
 import { Escalated } from './components/Escalated';
 import { AdminDashboard } from './components/AdminDashboard';
+import { AdminEmployeeSettings } from './components/AdminEmployeeSettings';
 import { TicketTracking } from './components/TicketTracking';
 import * as api from '../services/api';
 
@@ -164,6 +165,15 @@ export default function App() {
                 />
             );
         }
+    }
+
+    if (view === 'settings' && currentUser?.role === 'admin') {
+        return (
+            <AdminEmployeeSettings
+                user={currentUser}
+                onLogout={handleLogout}
+            />
+        );
     }
 
     if (view === 'profile' && currentUser && currentUser.role === 'client') {

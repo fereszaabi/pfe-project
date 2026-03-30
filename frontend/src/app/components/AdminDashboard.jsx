@@ -1,17 +1,21 @@
 import { useState, useEffect } from 'react';
 import { Shield, Users, Ticket, Activity, TrendingUp, LogOut, User, Clock } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard } from '../../services/api';
+import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance } from '../../services/api';
 
 export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const [activeTab, setActiveTab] = useState(activeView || 'overview');
     const [editingBalanceId, setEditingBalanceId] = useState(null);
     const [balanceDraft, setBalanceDraft] = useState('');
+    const [balanceOperation, setBalanceOperation] = useState('set'); // 'add', 'subtract', 'set'
     const [selectedClient, setSelectedClient] = useState(null);
+    const [selectedClientHistory, setSelectedClientHistory] = useState(null);
     const [tickets, setTickets] = useState([]);
     const [stats, setStats] = useState({ total: 0, by_status: {} });
     const [leaderboard, setLeaderboard] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [selectedTicketDetail, setSelectedTicketDetail] = useState(null);
+    const [ticketDetailLoading, setTicketDetailLoading] = useState(false);
 
     const fetchData = () => {
         setLoading(true);
@@ -34,16 +38,18 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
 
     const handleEditBalance = (client) => {
         setEditingBalanceId(client.id);
-        setBalanceDraft(String(client.money ?? 0));
+        setBalanceDraft('');
+        setBalanceOperation('set');
     };
 
     const handleSaveBalance = async (clientId) => {
         const val = parseFloat(balanceDraft);
-        if (!isNaN(val)) {
-            await takeMoney(clientId, val).catch(() => {});
+        if (!isNaN(val) && balanceDraft.trim() !== '') {
+            await updateClientBalance(clientId, val, balanceOperation).catch(() => {});
             fetchData();
         }
         setEditingBalanceId(null);
+        setBalanceDraft('');
     };
 
     const handleUpdateDemandeStatus = async (demandeId, status) => {
@@ -61,6 +67,18 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
         if (!confirm('Delete this user?')) return;
         await deleteUser(userId).catch(() => {});
         fetchData();
+    };
+
+    const handleViewTicketDetail = async (ticketId) => {
+        setTicketDetailLoading(true);
+        try {
+            const detail = await getAdminTicketDetail(ticketId);
+            setSelectedTicketDetail(detail);
+        } catch (err) {
+            console.error('Error loading ticket details:', err);
+        } finally {
+            setTicketDetailLoading(false);
+        }
     };
 
     // Calculate statistics
@@ -584,6 +602,7 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                             <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Title</th>
                                             <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Status</th>
                                             <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Created</th>
+                                            <th className="px-6 py-4 text-center text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Action</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -598,6 +617,14 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                                     </span>
                                                 </td>
                                                 <td className="px-6 py-4 text-sm text-slate-500 font-medium">{new Date(ticket.created_at).toLocaleDateString()}</td>
+                                                <td className="px-6 py-4 text-center">
+                                                    <button 
+                                                        onClick={() => handleViewTicketDetail(ticket.id)}
+                                                        className="text-[10px] font-black uppercase text-primary hover:underline hover:text-primary/80 tracking-widest transition-all"
+                                                    >
+                                                        VIEW
+                                                    </button>
+                                                </td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -673,23 +700,38 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                                 <div className="text-right">
                                                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">Current Balance</p>
                                                     {isEditingBal ? (
-                                                        <div className="flex items-center gap-2">
-                                                            <input
-                                                                type="number"
-                                                                step="0.01"
-                                                                value={balanceDraft}
-                                                                onChange={e => setBalanceDraft(e.target.value)}
-                                                                className="w-28 px-3 py-1.5 text-sm font-bold border border-primary rounded-lg focus:ring-2 focus:ring-primary/40 text-slate-900 dark:text-white dark:bg-midnight"
-                                                                autoFocus
-                                                                onKeyDown={e => { if (e.key === 'Enter') handleSaveBalance(client.id); if (e.key === 'Escape') setEditingBalanceId(null); }}
-                                                            />
-                                                            <span className="text-sm text-slate-500">DT</span>
-                                                            <button onClick={() => handleSaveBalance(client.id)} className="size-8 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 flex items-center justify-center transition-colors">
-                                                                <span className="material-symbols-outlined text-lg">check</span>
-                                                            </button>
-                                                            <button onClick={() => setEditingBalanceId(null)} className="size-8 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-500 flex items-center justify-center transition-colors">
-                                                                <span className="material-symbols-outlined text-lg">close</span>
-                                                            </button>
+                                                        <div className="space-y-2">
+                                                            <div className="flex items-center gap-2">
+                                                                <select
+                                                                    value={balanceOperation}
+                                                                    onChange={e => setBalanceOperation(e.target.value)}
+                                                                    className="px-2 py-1.5 text-sm font-bold border border-primary rounded-lg focus:ring-2 focus:ring-primary/40 text-slate-900 dark:text-white dark:bg-midnight bg-white"
+                                                                >
+                                                                    <option value="set">Set to</option>
+                                                                    <option value="add">Add</option>
+                                                                    <option value="subtract">Subtract</option>
+                                                                </select>
+                                                                <input
+                                                                    type="number"
+                                                                    step="0.01"
+                                                                    min="0"
+                                                                    value={balanceDraft}
+                                                                    onChange={e => setBalanceDraft(e.target.value)}
+                                                                    placeholder="0.00"
+                                                                    className="w-20 px-3 py-1.5 text-sm font-bold border border-primary rounded-lg focus:ring-2 focus:ring-primary/40 text-slate-900 dark:text-white dark:bg-midnight bg-white"
+                                                                    autoFocus
+                                                                    onKeyDown={e => { if (e.key === 'Enter') handleSaveBalance(client.id); if (e.key === 'Escape') setEditingBalanceId(null); }}
+                                                                />
+                                                                <span className="text-sm text-slate-500 font-bold">DT</span>
+                                                            </div>
+                                                            <div className="flex gap-1">
+                                                                <button onClick={() => handleSaveBalance(client.id)} className="flex-1 size-8 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 flex items-center justify-center transition-colors">
+                                                                    <span className="material-symbols-outlined text-lg">check</span>
+                                                                </button>
+                                                                <button onClick={() => setEditingBalanceId(null)} className="flex-1 size-8 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-500 flex items-center justify-center transition-colors">
+                                                                    <span className="material-symbols-outlined text-lg">close</span>
+                                                                </button>
+                                                            </div>
                                                         </div>
                                                     ) : (
                                                         <div className="flex items-center gap-2">
@@ -741,7 +783,18 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
                                                         <h5 className="text-sm font-bold text-slate-700 dark:text-slate-300">Recent Tickets</h5>
-                                                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-primary/10 text-primary">{openCount} OPEN</span>
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-primary/10 text-primary">{openCount} OPEN</span>
+                                                            {clientTickets.length > 0 && (
+                                                                <button
+                                                                    onClick={() => setSelectedClientHistory(client)}
+                                                                    className="text-[10px] font-bold px-3 py-1 rounded-lg bg-primary/10 hover:bg-primary/20 text-primary transition-colors flex items-center gap-1"
+                                                                >
+                                                                    <span className="material-symbols-outlined text-xs">history</span>
+                                                                    View All History
+                                                                </button>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                     {clientTickets.length === 0 ? (
                                                         <p className="text-sm text-slate-400 italic">No tickets submitted.</p>
@@ -833,6 +886,306 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                     )}
                 </div>
             </main>
+
+            {/* Ticket Detail Modal */}
+            {selectedTicketDetail && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-midnight-accent rounded-2xl shadow-2xl max-w-2xl w-full border border-slate-200 dark:border-slate-800 max-h-[90vh] overflow-y-auto">
+                        {/* Modal Header */}
+                        <div className="sticky top-0 p-6 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-midnight-accent flex items-center justify-between">
+                            <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
+                                <span className="material-symbols-outlined text-primary">confirmation_number</span>
+                                Ticket Details - #{String(selectedTicketDetail.id).slice(0, 8)}
+                            </h2>
+                            <button
+                                onClick={() => setSelectedTicketDetail(null)}
+                                className="size-8 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 flex items-center justify-center transition-colors"
+                            >
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        {/* Modal Content */}
+                        {ticketDetailLoading ? (
+                            <div className="p-8 text-center">
+                                <span className="material-symbols-outlined text-4xl animate-spin mx-auto block mb-3 text-primary">settings</span>
+                                <p className="text-slate-500">Loading ticket details...</p>
+                            </div>
+                        ) : (
+                            <div className="p-6 space-y-6">
+                                {/* Basic Information */}
+                                <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                    <h3 className="font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                                        <span className="material-symbols-outlined text-primary">info</span>
+                                        Basic Information
+                                    </h3>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Ticket ID</p>
+                                            <p className="text-sm font-mono font-bold text-slate-900 dark:text-white">#{selectedTicketDetail.id}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Status</p>
+                                            <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider inline-block ${getStatusColor(selectedTicketDetail.status)}`}>
+                                                {selectedTicketDetail.status}
+                                            </span>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Title</p>
+                                            <p className="text-sm font-semibold text-slate-900 dark:text-white">{selectedTicketDetail.titre || 'N/A'}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Priority</p>
+                                            <p className="text-sm font-semibold text-slate-900 dark:text-white capitalize">{selectedTicketDetail.priority || 'N/A'}</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Description */}
+                                <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                    <h3 className="font-bold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
+                                        <span className="material-symbols-outlined text-primary">description</span>
+                                        Description
+                                    </h3>
+                                    <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">{selectedTicketDetail.description || 'No description provided'}</p>
+                                </div>
+
+                                {/* Client Information */}
+                                {selectedTicketDetail.client && (
+                                    <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                        <h3 className="font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                                            <span className="material-symbols-outlined text-primary">person</span>
+                                            Client Information
+                                        </h3>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Company</p>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white">{selectedTicketDetail.client.nom || 'N/A'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Email</p>
+                                                <p className="text-sm text-slate-900 dark:text-white">{selectedTicketDetail.client.mail || 'N/A'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">CIN</p>
+                                                <p className="text-sm text-slate-900 dark:text-white">{selectedTicketDetail.client.cin || 'N/A'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Code Fiscal</p>
+                                                <p className="text-sm text-slate-900 dark:text-white">{selectedTicketDetail.client.code_fiscal || 'N/A'}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Employee Assignment */}
+                                {selectedTicketDetail.employee && (
+                                    <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                        <h3 className="font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                                            <span className="material-symbols-outlined text-primary">engineering</span>
+                                            Assigned Employee
+                                        </h3>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Employee Name</p>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white">{selectedTicketDetail.employee.nom || 'Unassigned'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Email</p>
+                                                <p className="text-sm text-slate-900 dark:text-white">{selectedTicketDetail.employee.mail || 'N/A'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Rating</p>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white">⭐ {(selectedTicketDetail.employee.avg_rating ?? 0).toFixed(1)}/5</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Avg Resolution Time</p>
+                                                <p className="text-sm text-slate-900 dark:text-white">{(selectedTicketDetail.employee.avg_resolution_hours ?? 0).toFixed(1)}h</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Timeline Information */}
+                                <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                    <h3 className="font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                                        <span className="material-symbols-outlined text-primary">schedule</span>
+                                        Timeline
+                                    </h3>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Created At</p>
+                                            <p className="text-sm text-slate-900 dark:text-white">{new Date(selectedTicketDetail.created_at).toLocaleString()}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Updated At</p>
+                                            <p className="text-sm text-slate-900 dark:text-white">{new Date(selectedTicketDetail.updated_at).toLocaleString()}</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Machine Information (if available) */}
+                                {selectedTicketDetail.machine && (
+                                    <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                        <h3 className="font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                                            <span className="material-symbols-outlined text-primary">devices</span>
+                                            Machine Information
+                                        </h3>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Machine ID</p>
+                                                <p className="text-sm text-slate-900 dark:text-white">{selectedTicketDetail.machine.id || 'N/A'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Model</p>
+                                                <p className="text-sm text-slate-900 dark:text-white">{selectedTicketDetail.machine.model || 'N/A'}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Rating Information */}
+                                {selectedTicketDetail.rating && (
+                                    <div className="bg-emerald-50 dark:bg-emerald-900/20 rounded-xl p-4 border border-emerald-200 dark:border-emerald-800">
+                                        <h3 className="font-bold text-emerald-900 dark:text-emerald-100 mb-3 flex items-center gap-2">
+                                            <span className="material-symbols-outlined">star</span>
+                                            Client Rating
+                                        </h3>
+                                        <div className="flex items-center gap-4">
+                                            <span className="text-4xl font-black text-emerald-600">⭐ {selectedTicketDetail.rating}</span>
+                                            <p className="text-sm text-emerald-700 dark:text-emerald-200">Rated by client</p>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Modal Footer */}
+                        <div className="border-t border-slate-200 dark:border-slate-800 p-6 bg-slate-50/50 dark:bg-midnight/50 flex justify-end gap-3">
+                            <button
+                                onClick={() => setSelectedTicketDetail(null)}
+                                className="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-900 dark:text-white font-semibold transition-colors"
+                            >
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Client Ticket History Modal */}
+            {selectedClientHistory && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-midnight-accent rounded-2xl shadow-2xl max-w-4xl w-full border border-slate-200 dark:border-slate-800 max-h-[90vh] overflow-y-auto">
+                        {/* Modal Header */}
+                        <div className="sticky top-0 p-6 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-midnight-accent flex items-center justify-between">
+                            <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
+                                <span className="material-symbols-outlined text-primary">history</span>
+                                Ticket History - {selectedClientHistory.nom || selectedClientHistory.name}
+                            </h2>
+                            <button
+                                onClick={() => setSelectedClientHistory(null)}
+                                className="size-8 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 flex items-center justify-center transition-colors"
+                            >
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        {/* Modal Content */}
+                        <div className="p-6">
+                            {/* Client Summary */}
+                            <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4 mb-6">
+                                <div className="grid grid-cols-4 gap-4">
+                                    <div>
+                                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Client Name</p>
+                                        <p className="text-sm font-semibold text-slate-900 dark:text-white">{selectedClientHistory.nom || selectedClientHistory.name}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Email</p>
+                                        <p className="text-sm text-slate-900 dark:text-white">{selectedClientHistory.mail || 'N/A'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">CIN</p>
+                                        <p className="text-sm text-slate-900 dark:text-white">{selectedClientHistory.cin || 'N/A'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Total Tickets</p>
+                                        <p className="text-2xl font-bold text-primary">{tickets.filter(t => t.id_client === selectedClientHistory.id || t.client?.id === selectedClientHistory.id).length}</p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Tickets Table */}
+                            {(() => {
+                                const clientTickets = tickets.filter(t => t.id_client === selectedClientHistory.id || t.client?.id === selectedClientHistory.id);
+                                return clientTickets.length === 0 ? (
+                                    <div className="text-center py-8">
+                                        <span className="material-symbols-outlined text-4xl text-slate-300 dark:text-slate-700">inbox</span>
+                                        <p className="text-slate-400 mt-4 font-medium">No tickets found for this client.</p>
+                                    </div>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full">
+                                            <thead className="bg-slate-50 dark:bg-midnight">
+                                                <tr>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Ticket ID</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Title</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Status</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Priority</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Assigned To</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Created</th>
+                                                    <th className="px-6 py-4 text-center text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                                {clientTickets.map((ticket) => (
+                                                    <tr key={ticket.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                                                        <td className="px-6 py-4 text-xs font-mono font-bold text-slate-500">#{String(ticket.id).slice(0, 8)}</td>
+                                                        <td className="px-6 py-4 text-sm font-semibold text-slate-900 dark:text-white">{ticket.titre || ticket.description?.substring(0, 40)}</td>
+                                                        <td className="px-6 py-4">
+                                                            <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${getStatusColor(ticket.status)}`}>
+                                                                {ticket.status}
+                                                            </span>
+                                                        </td>
+                                                        <td className="px-6 py-4 text-sm capitalize font-medium text-slate-600 dark:text-slate-400">
+                                                            {ticket.priority || 'N/A'}
+                                                        </td>
+                                                        <td className="px-6 py-4 text-sm text-slate-600 dark:text-slate-400">
+                                                            {ticket.employee?.nom || 'Unassigned'}
+                                                        </td>
+                                                        <td className="px-6 py-4 text-sm text-slate-500 font-medium">{new Date(ticket.created_at).toLocaleDateString()}</td>
+                                                        <td className="px-6 py-4 text-center">
+                                                            <button
+                                                                onClick={() => {
+                                                                    handleViewTicketDetail(ticket.id);
+                                                                    setSelectedClientHistory(null);
+                                                                }}
+                                                                className="text-[10px] font-black uppercase text-primary hover:underline hover:text-primary/80 tracking-widest transition-all"
+                                                            >
+                                                                VIEW
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                );
+                            })()}
+                        </div>
+
+                        {/* Modal Footer */}
+                        <div className="border-t border-slate-200 dark:border-slate-800 p-6 bg-slate-50/50 dark:bg-midnight/50 flex justify-end gap-3">
+                            <button
+                                onClick={() => setSelectedClientHistory(null)}
+                                className="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-900 dark:text-white font-semibold transition-colors"
+                            >
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

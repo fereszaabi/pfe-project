@@ -129,6 +129,9 @@ export const rateEmployee = (ticketId, rating) =>
 export const getAdminDemandes = () =>
     apiRequest('GET', '/admin/demandes');
 
+export const getAdminTicketDetail = (id) =>
+    apiRequest('GET', `/admin/demandes/${id}`);
+
 export const getAdminStats = () =>
     apiRequest('GET', '/admin/stats');
 
@@ -146,3 +149,19 @@ export const deleteUser = (id) =>
 
 export const takeMoney = (id, amount) =>
     apiRequest('PATCH', `/admin/clients/${id}/take-money`, { amount });
+
+export const updateClientBalance = (id, amount, operation = 'set') =>
+    apiRequest('PATCH', `/admin/clients/${id}/balance`, { amount, operation });
+
+// ── Employee Management ──────────────────────────────────────────────
+export const getEmployees = () =>
+    apiRequest('GET', '/admin/employees');
+
+export const createEmployee = (data) =>
+    apiRequest('POST', '/admin/employees', data);
+
+export const updateEmployee = (id, data) =>
+    apiRequest('PATCH', `/admin/employees/${id}`, data);
+
+export const deleteEmployee = (id) =>
+    apiRequest('DELETE', `/admin/employees/${id}`);

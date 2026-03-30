@@ -15,7 +15,7 @@ use App\Http\Controllers\Api\ClientProfileController;
 |--------------------------------------------------------------------------
 | API Routes
 |--------------------------------------------------------------------------
-
+*/
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
@@ -57,6 +57,13 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('/admin/demandes/{demande}/status', [AdminUserController::class, 'update_statu']);
         Route::delete('/admin/users/{user}', [AdminUserController::class, 'destroy']);
         Route::patch('/admin/clients/{client}/take-money', [AdminUserController::class, 'takeMoney']);
+        Route::patch('/admin/clients/{client}/balance', [AdminUserController::class, 'updateBalance']);
+        
+        // Employee Management
+        Route::get('/admin/employees', [AdminUserController::class, 'getEmployees']);
+        Route::post('/admin/employees', [AdminUserController::class, 'storeEmployee']);
+        Route::patch('/admin/employees/{employeeId}', [AdminUserController::class, 'updateEmployee']);
+        Route::delete('/admin/employees/{employeeId}', [AdminUserController::class, 'destroyEmployee']);
     });
 
     // Messaging (available to employees, admins, and clients)
