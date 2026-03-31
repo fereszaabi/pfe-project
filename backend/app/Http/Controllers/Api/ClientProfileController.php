@@ -14,15 +14,10 @@ class ClientProfileController extends Controller
      */
     public function getProfile(Request $request)
     {
-        $client = Client::find($request->user()->id);
-
-        if (!$client || !$client->client_id) {
-            return response()->json(['message' => 'Client profile not found'], 404);
-        }
-
-        // Get the Client record (separate from User)
-        $clientRecord = Client::where('id', $client->client_id)->first() ?? 
-                        Client::where('cin', $client->cin)->orWhere('code_fiscal', $client->code_fiscal)->first();
+        $user = $request->user();
+        
+        // Find the actual Client record by CIN
+        $clientRecord = Client::where('cin', $user->cin)->first();
 
         if (!$clientRecord) {
             return response()->json(['message' => 'Client record not found'], 404);

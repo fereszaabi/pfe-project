@@ -17,7 +17,14 @@ class ClientController extends Controller
      */
     public function index(Request $request)
     {
-        $clientId = $request->user()->id;
+        $user = $request->user();
+        $client = Client::where('cin', $user->cin)->first();
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
+
+        $clientId = $client->id;
 
         $demandes = Demande::where('id_client', $clientId)
             ->select([
@@ -52,7 +59,14 @@ class ClientController extends Controller
      */
     public function store(Request $request)
     {
-        $clientId = $request->user()->id;
+        $user = $request->user();
+        $client = Client::where('cin', $user->cin)->first();
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
+
+        $clientId = $client->id;
 
         $imagePath = null;
         if ($request->hasFile('image')) {
@@ -92,10 +106,15 @@ class ClientController extends Controller
      */
     public function show(Request $request, Demande $ticket)
     {
-        $clientId = $request->user()->id;
+        $user = $request->user();
+        $client = Client::where('cin', $user->cin)->first();
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
 
         // Ensure the ticket belongs to the authenticated client
-        if ($ticket->id_client !== $clientId) {
+        if ($ticket->id_client !== $client->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
@@ -117,10 +136,15 @@ class ClientController extends Controller
      */
     public function rate(Request $request, Demande $ticket)
     {
-        $clientId = $request->user()->id;
+        $user = $request->user();
+        $client = Client::where('cin', $user->cin)->first();
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
 
         // Ensure the ticket belongs to the authenticated client
-        if ($ticket->id_client !== $clientId) {
+        if ($ticket->id_client !== $client->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
