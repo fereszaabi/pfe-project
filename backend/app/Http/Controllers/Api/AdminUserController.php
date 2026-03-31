@@ -163,7 +163,7 @@ class AdminUserController extends Controller
      */
     public function getClients()
     {
-        $clients = Client::with(['user'])->orderBy('created_at', 'desc')->get();
+        $clients = Client::orderBy('created_at', 'desc')->get();
         
         return response()->json(['clients' => $clients]);
     }

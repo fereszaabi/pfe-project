@@ -25,9 +25,12 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                 setTickets(Array.isArray(demandesData) ? demandesData : demandesData.data ?? []);
                 setStats(statsData);
                 setLeaderboard(leaderboardData?.leaderboard ?? []);
+                console.log('Clients data received:', clientsData);
                 setClientUsers(Array.isArray(clientsData?.clients) ? clientsData.clients : []);
             })
-            .catch(() => {})
+            .catch((err) => {
+                console.error('Error fetching admin data:', err);
+            })
             .finally(() => setLoading(false));
     };
 
