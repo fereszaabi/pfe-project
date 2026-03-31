@@ -84,21 +84,36 @@ class ClientController extends Controller
             ]
         );
 
+        // Check if client has insufficient funds (starting balance check)
+        // Ticket starts at 0 cost, but we flag if client balance is already negative
+        $hasInsufficientFunds = $client->money < 0;
+
         $demande = Demande::create([
-            'id_client'     => $clientId,
-            'titre'         => $request->titre,
-            'id_employee'   => null,
-            'priority'      => $request->priority,
-            'id_machine'    => $machine->id,
-            'description'   => $request->description,
-            'image'         => $imagePath,
-            'status'        => 'submitted',
-            'end_at'        => null,
-            'employee_note' => null,
-            'created_at'    => now(),
+            'id_client'             => $clientId,
+            'titre'                 => $request->titre,
+            'id_employee'           => null,
+            'priority'              => $request->priority,
+            'id_machine'            => $machine->id,
+            'description'           => $request->description,
+            'image'                 => $imagePath,
+            'status'                => 'submitted',
+            'ticket_cost'           => 0, // Start at 0
+            'total_cost'            => 0, // Start at 0
+            'payment_status'        => 'pending', // Default to pending until admin sets cost
+            'end_at'                => null,
+            'employee_note'         => null,
+            'insufficient_funds'    => $hasInsufficientFunds, // Flag for insufficient funds
+            'created_at'            => now(),
         ]);
 
-        return response()->json($demande, 201);
+        return response()->json([
+            'demande' => $demande,
+            'client_balance' => $client->money,
+            'insufficient_funds' => $hasInsufficientFunds,
+            'warning' => $hasInsufficientFunds 
+                ? 'Warning: Client has insufficient funds. Admin approval required to proceed.' 
+                : null,
+        ], 201);
     }
 
     /**

@@ -65,6 +65,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/admin/employees', [AdminUserController::class, 'storeEmployee']);
         Route::patch('/admin/employees/{employeeId}', [AdminUserController::class, 'updateEmployee']);
         Route::delete('/admin/employees/{employeeId}', [AdminUserController::class, 'destroyEmployee']);
+        
+        // Ticket Finance Management
+        Route::get('/admin/tickets/insufficient-funds', [AdminUserController::class, 'getInsufficientFundsTickets']);
+        Route::post('/admin/tickets/{ticketId}/set-cost', [AdminUserController::class, 'setTicketCost']);
+        Route::post('/admin/tickets/{ticketId}/approve-override', [AdminUserController::class, 'approveInsufficientFundsTicket']);
+        Route::post('/admin/tickets/{ticketId}/process-payment', [AdminUserController::class, 'processTicketPayment']);
     });
 
     // Messaging (available to employees, admins, and clients)

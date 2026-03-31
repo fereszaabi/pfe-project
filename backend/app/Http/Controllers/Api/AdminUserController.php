@@ -277,5 +277,127 @@ class AdminUserController extends Controller
 
         return response()->json(['message' => 'Employé supprimé avec succès']);
     }
+
+    /**
+     * Get all tickets with insufficient funds that need admin approval
+     */
+    public function getInsufficientFundsTickets()
+    {
+        $tickets = Demande::where('insufficient_funds', true)
+            ->where('admin_approved_override', false)
+            ->with(['client', 'employee', 'machine'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        $summary = [
+            'pending_count' => $tickets->count(),
+            'total_amount_needed' => $tickets->sum(function ($ticket) {
+                $cost = abs($ticket->client->money); // Amount needed to bring balance to 0
+                return max(0, $cost);
+            }),
+        ];
+
+        return response()->json([
+            'tickets' => $tickets,
+            'summary' => $summary,
+        ]);
+    }
+
+    /**
+     * Set ticket cost and update client balance
+     */
+    public function setTicketCost(Request $request, $ticketId)
+    {
+        $validated = $request->validate([
+            'ticket_cost' => 'required|numeric|min:0',
+            'notes' => 'nullable|string',
+        ]);
+
+        $ticket = Demande::find($ticketId);
+        
+        if (!$ticket) {
+            return response()->json(['error' => 'Ticket not found'], 404);
+        }
+
+        $client = Client::find($ticket->id_client);
+
+        // Set the cost on the ticket
+        $ticket->update([
+            'ticket_cost' => $validated['ticket_cost'],
+            'total_cost' => $validated['ticket_cost'],
+            'payment_notes' => $validated['notes'] ?? $ticket->payment_notes,
+        ]);
+
+        return response()->json([
+            'message' => 'Ticket cost set successfully',
+            'ticket' => $ticket->fresh()->load(['client', 'employee', 'machine']),
+            'client_balance' => $client->money,
+        ]);
+    }
+
+    /**
+     * Approve a ticket with insufficient funds and allow negative balance
+     */
+    public function approveInsufficientFundsTicket(Request $request, $ticketId)
+    {
+        $validated = $request->validate([
+            'ticket_cost' => 'required|numeric|min:0',
+            'admin_notes' => 'nullable|string',
+        ]);
+
+        $ticket = Demande::find($ticketId);
+        
+        if (!$ticket) {
+            return response()->json(['error' => 'Ticket not found'], 404);
+        }
+
+        $client = Client::find($ticket->id_client);
+
+        // Deduct the cost from client balance (will go negative if needed)
+        $newBalance = $client->money - $validated['ticket_cost'];
+        $client->update(['money' => $newBalance]);
+
+        // Mark ticket as approved despite insufficient funds
+        $ticket->update([
+            'ticket_cost' => $validated['ticket_cost'],
+            'total_cost' => $validated['ticket_cost'],
+            'payment_status' => 'pending',
+            'payment_notes' => $validated['admin_notes'] ?? 'Admin approved despite insufficient funds',
+            'admin_approved_override' => true,
+        ]);
+
+        return response()->json([
+            'message' => 'Ticket approved. Balance may now be negative.',
+            'ticket' => $ticket->fresh()->load(['client', 'employee', 'machine']),
+            'client_balance' => $newBalance,
+            'balance_warning' => $newBalance < 0 ? 'Client balance is now negative: ' . $newBalance . ' TND' : null,
+        ]);
+    }
+
+    /**
+     * Process payment for a ticket
+     */
+    public function processTicketPayment(Request $request, $ticketId)
+    {
+        $ticket = Demande::find($ticketId);
+        
+        if (!$ticket) {
+            return response()->json(['error' => 'Ticket not found'], 404);
+        }
+
+        $client = Client::find($ticket->id_client);
+
+        // Mark as paid
+        $ticket->update([
+            'payment_status' => 'paid',
+            'paid_at' => now(),
+        ]);
+
+        return response()->json([
+            'message' => 'Payment processed successfully',
+            'ticket' => $ticket->fresh(),
+            'client_balance' => $client->money,
+        ]);
+    }
     
 }

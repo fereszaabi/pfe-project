@@ -33,6 +33,8 @@ class Demande extends Model
         'payment_status',
         'paid_at',
         'payment_notes',
+        'insufficient_funds',
+        'admin_approved_override',
     ];
 
     protected $casts = [
@@ -46,6 +48,8 @@ class Demande extends Model
         'total_cost' => 'decimal:3',
         'client_rating' => 'integer',
         'reopen_count' => 'integer',
+        'insufficient_funds' => 'boolean',
+        'admin_approved_override' => 'boolean',
     ];
 
     public function client()
