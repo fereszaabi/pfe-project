@@ -52,6 +52,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/admin/demandes', [AdminUserController::class, 'index']);
         Route::get('/admin/demandes/{demande}', [AdminUserController::class, 'show']);
         Route::get('/admin/stats', [AdminUserController::class, 'stats']);
+        Route::get('/admin/clients', [AdminUserController::class, 'getClients']);
         Route::post('/admin/users', [AdminUserController::class, 'store']);
         Route::patch('/admin/clients/{client}', [AdminUserController::class, 'update']);
         Route::patch('/admin/demandes/{demande}/status', [AdminUserController::class, 'update_statu']);

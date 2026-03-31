@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Shield, Users, Ticket, Activity, TrendingUp, LogOut, User, Clock } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance } from '../../services/api';
+import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance, getAdminClients } from '../../services/api';
 
 export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const [activeTab, setActiveTab] = useState(activeView || 'overview');
@@ -11,6 +11,7 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const [selectedClient, setSelectedClient] = useState(null);
     const [selectedClientHistory, setSelectedClientHistory] = useState(null);
     const [tickets, setTickets] = useState([]);
+    const [clientUsers, setClientUsers] = useState([]);
     const [stats, setStats] = useState({ total: 0, by_status: {} });
     const [leaderboard, setLeaderboard] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -19,22 +20,18 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
 
     const fetchData = () => {
         setLoading(true);
-        Promise.all([getAdminDemandes(), getAdminStats(), getEmployeeLeaderboard(10)])
-            .then(([demandesData, statsData, leaderboardData]) => {
+        Promise.all([getAdminDemandes(), getAdminStats(), getEmployeeLeaderboard(10), getAdminClients()])
+            .then(([demandesData, statsData, leaderboardData, clientsData]) => {
                 setTickets(Array.isArray(demandesData) ? demandesData : demandesData.data ?? []);
                 setStats(statsData);
                 setLeaderboard(leaderboardData?.leaderboard ?? []);
+                setClientUsers(Array.isArray(clientsData?.clients) ? clientsData.clients : []);
             })
             .catch(() => {})
             .finally(() => setLoading(false));
     };
 
     useEffect(() => { fetchData(); }, []);
-
-    // Clients are embedded in demandes via eager-loading
-    const clientUsers = [...new Map(
-        tickets.filter(t => t.client).map(t => [t.client.id, t.client])
-    ).values()];
 
     const handleEditBalance = (client) => {
         setEditingBalanceId(client.id);

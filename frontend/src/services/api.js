@@ -135,6 +135,9 @@ export const getAdminTicketDetail = (id) =>
 export const getAdminStats = () =>
     apiRequest('GET', '/admin/stats');
 
+export const getAdminClients = () =>
+    apiRequest('GET', '/admin/clients');
+
 export const createAdminUser = (data) =>
     apiRequest('POST', '/admin/users', data);
 

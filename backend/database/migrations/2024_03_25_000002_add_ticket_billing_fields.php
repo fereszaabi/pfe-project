@@ -20,9 +20,7 @@ return new class extends Migration
             $table->string('payment_notes')->nullable()->after('paid_at')->comment('Payment reference or notes');
         });
 
-        Schema::table('transaction_logs', function (Blueprint $table) {
-            // Will be created in next migration if needed
-        })->whenTableDoesntExist();
+        // transaction_logs table will be created separately if needed
     }
 
     /**
