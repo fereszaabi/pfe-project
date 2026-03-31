@@ -6,10 +6,10 @@ import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmp
 export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const [selectedTicket, setSelectedTicket] = useState(null);
     const [filterStatus, setFilterStatus] = useState('all');
-    const [notes, setNotes] = useState('');
     const [searchQuery, setSearchQuery] = useState('');
-    const [tickets, setTickets] = useState([]);
-    const [newDemandes, setNewDemandes] = useState([]);
+    const [allTickets, setAllTickets] = useState([]);
+    const [myTickets, setMyTickets] = useState([]);
+    const [unassignedTickets, setUnassignedTickets] = useState([]);
     const [loading, setLoading] = useState(true);
     const [employeeStats, setEmployeeStats] = useState(null);
     const [showMessageModal, setShowMessageModal] = useState(false);
@@ -21,11 +21,18 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         setLoading(true);
         Promise.all([getEmployeeTickets(), getEmployeeStats()])
             .then(([data, stats]) => {
-                setTickets(data.demandes?.data ?? data.demandes ?? []);
-                setNewDemandes(data.new_demandes?.data ?? data.new_demandes ?? []);
+                console.log('Employee tickets data:', data);
+                setAllTickets(data.all_tickets?.data ?? data.all_tickets ?? []);
+                setMyTickets(data.my_tickets?.data ?? data.my_tickets ?? []);
+                setUnassignedTickets(data.unassigned_tickets?.data ?? data.unassigned_tickets ?? []);
                 setEmployeeStats(stats);
             })
-            .catch(() => {})
+            .catch((err) => {
+                console.error('Failed to fetch employee tickets:', err);
+                setAllTickets([]);
+                setMyTickets([]);
+                setUnassignedTickets([]);
+            })
             .finally(() => setLoading(false));
     };
 
@@ -92,8 +99,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
 
     const handleResolve = async (ticketId) => {
         try {
-            await updateEmployeeTicket(ticketId, { status: 'resolved', employee_note: notes });
-            setNotes('');
+            await updateEmployeeTicket(ticketId, { status: 'resolved' });
             setSelectedTicket(null);
             fetchTickets();
         } catch (_) {}
@@ -101,8 +107,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
 
     const handleEscalate = async (ticketId) => {
         try {
-            await updateEmployeeTicket(ticketId, { status: 'tech', employee_note: notes });
-            setNotes('');
+            await updateEmployeeTicket(ticketId, { status: 'tech' });
             setSelectedTicket(null);
             fetchTickets();
         } catch (_) {}
@@ -142,11 +147,9 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
 
     const priorityOrder = { urgent: 0, high: 1, medium: 2, low: 3 };
 
-    const allTickets = showOnlyMyTickets 
-        ? tickets 
-        : [...newDemandes, ...tickets];
+    const displayedTickets = showOnlyMyTickets ? myTickets : allTickets;
     
-    const filteredTickets = allTickets
+    const filteredTickets = displayedTickets
         .filter(t => filterStatus === 'all' || t.status === filterStatus)
         .filter(t => searchQuery === '' ||
             t.titre?.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -155,15 +158,15 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         .sort((a, b) => (priorityOrder[a.priority] ?? 4) - (priorityOrder[b.priority] ?? 4));
 
     const stats = {
-        total: allTickets.length,
-        submitted: newDemandes.length,
-        inProgress: allTickets.filter(t => t.status === 'in progress' || t.status === 'in-progress').length,
-        resolved: allTickets.filter(t => t.status === 'resolved').length
+        total: displayedTickets.length,
+        submitted: displayedTickets.filter(t => t.status === 'submitted').length,
+        inProgress: displayedTickets.filter(t => t.status === 'in progress' || t.status === 'in-progress').length,
+        resolved: displayedTickets.filter(t => t.status === 'resolved').length
     };
 
     // performance chart data by grouping resolved tickets by week
     const getPerformanceChartData = () => {
-        const resolved = allTickets.filter(t => t.status === 'resolved');
+        const resolved = displayedTickets.filter(t => t.status === 'resolved');
         const weekData = {};
         resolved.forEach(ticket => {
             const date = new Date(ticket.completed_at);
@@ -226,7 +229,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                             <span className={`ml-auto text-[10px] px-2 py-0.5 rounded-full ${
                                 activeView === 'dashboard' ? 'bg-primary text-white' : 'bg-surface-dark text-slate-400'
                             }`}>
-                {tickets.length}
+                {myTickets.length}
                             </span>
                         </button>
                         <button
@@ -349,7 +352,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                     </div>
                                 </div>
                                 <div className="flex items-end gap-3">
-                                    <h3 className="text-3xl font-bold text-slate-900 dark:text-white">{newDemandes.length}</h3>
+                                    <h3 className="text-3xl font-bold text-slate-900 dark:text-white">{unassignedTickets.length}</h3>
                                     <span className="text-slate-400 text-xs font-bold mb-1">Stable</span>
                                 </div>
                                 <p className="text-[10px] text-[#bba99b] mt-2 uppercase tracking-wide">Pending information</p>
@@ -652,16 +655,6 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
 
                             {selectedTicket.status !== 'resolved' && (
                                 <div className="pt-6 border-t border-slate-100 dark:border-[#3a2f27] space-y-6">
-                                    <div>
-                                        <label className="text-sm font-bold text-slate-900 dark:text-white mb-3 block">Resolution Notes</label>
-                                        <textarea
-                                            value={notes}
-                                            onChange={(e) => setNotes(e.target.value)}
-                                            className="w-full bg-slate-50 dark:bg-[#181411] border border-slate-200 dark:border-[#3a2f27] rounded-xl p-4 text-sm focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white placeholder-slate-400 min-h-[120px]"
-                                            placeholder="Enter technical resolution steps or update client status..."
-                                        />
-                                    </div>
-
                                     <div className="flex flex-col gap-3">
                                         {!selectedTicket.id_employee ? (
                                             <button

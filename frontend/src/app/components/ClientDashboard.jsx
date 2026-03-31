@@ -1,10 +1,13 @@
 import { useState, useEffect } from 'react';
-import { getClientTickets, createTicket, rateEmployee } from '../../services/api';
+import { getClientTickets, createTicket, rateEmployee, getMachines } from '../../services/api';
 
 export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, activeView }) {
     const [showCreateTicket, setShowCreateTicket] = useState(false);
     const [tickets, setTickets] = useState([]);
     const [loadingTickets, setLoadingTickets] = useState(true);
+    const [machines, setMachines] = useState([]);
+    const [loadingMachines, setLoadingMachines] = useState(false);
+    const [createNewMachine, setCreateNewMachine] = useState(false);
     const [submitError, setSubmitError] = useState('');
     const [ratingTicket, setRatingTicket] = useState(null);
     const [ratingValue, setRatingValue] = useState(0);
@@ -13,7 +16,8 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [newTicket, setNewTicket] = useState({
         titre: '',
         description: '',
-        nom_poste: '',
+        machine_id: '',
+        code_anydesk: '',
         priority: 'low',
         image: null
     });
@@ -28,6 +32,16 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             .finally(() => setLoadingTickets(false));
     }, []);
 
+    useEffect(() => {
+        if (showCreateTicket) {
+            setLoadingMachines(true);
+            getMachines()
+                .then((data) => setMachines(data.machines ?? []))
+                .catch(() => setMachines([]))
+                .finally(() => setLoadingMachines(false));
+        }
+    }, [showCreateTicket]);
+
     const handleImageChange = (e) => {
         const file = e.target.files[0];
         if (file) setNewTicket({ ...newTicket, image: file });
@@ -36,17 +50,33 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const handleSubmit = async (e) => {
         e.preventDefault();
         setSubmitError('');
+        
+        // Validate machine selection
+        if (!createNewMachine && !newTicket.machine_id) {
+            setSubmitError('Please select an existing machine or create a new one');
+            return;
+        }
+        if (createNewMachine && !newTicket.code_anydesk.trim()) {
+            setSubmitError('Please enter the AnyDesk code for the new machine');
+            return;
+        }
+
         const fd = new FormData();
         fd.append('titre', newTicket.titre);
         fd.append('description', newTicket.description);
-        fd.append('nom_poste', newTicket.nom_poste);
+        if (createNewMachine) {
+            fd.append('code_anydesk', newTicket.code_anydesk);
+        } else {
+            fd.append('machine_id', newTicket.machine_id);
+        }
         fd.append('priority', newTicket.priority);
         if (newTicket.image) fd.append('image', newTicket.image);
         try {
             await createTicket(fd);
             const data = await getClientTickets();
             setTickets(data.demandes?.data ?? data.demandes ?? []);
-            setNewTicket({ titre: '', description: '', nom_poste: '', priority: 'low', image: null });
+            setNewTicket({ titre: '', description: '', machine_id: '', code_anydesk: '', priority: 'low', image: null });
+            setCreateNewMachine(false);
             setShowCreateTicket(false);
         } catch (err) {
             const msg = err?.errors
@@ -271,16 +301,46 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div>
                                         <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
-                                            Machine / Workstation Name
+                                            Machine
                                         </label>
-                                        <input
-                                            type="text"
-                                            required
-                                            value={newTicket.nom_poste}
-                                            onChange={(e) => setNewTicket({ ...newTicket, nom_poste: e.target.value })}
-                                            className="w-full px-4 py-3 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary text-slate-900 dark:text-white"
-                                            placeholder="e.g. Main POS Terminal"
-                                        />
+                                        {createNewMachine ? (
+                                            <input
+                                                type="text"
+                                                required
+                                                value={newTicket.code_anydesk}
+                                                onChange={(e) => setNewTicket({ ...newTicket, code_anydesk: e.target.value })}
+                                                className="w-full px-4 py-3 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary text-slate-900 dark:text-white"
+                                                placeholder="Enter AnyDesk code"
+                                            />
+                                        ) : (
+                                            <select
+                                                required={!createNewMachine}
+                                                value={newTicket.machine_id}
+                                                onChange={(e) => setNewTicket({ ...newTicket, machine_id: e.target.value })}
+                                                disabled={loadingMachines}
+                                                className="w-full px-4 py-3 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary text-slate-900 dark:text-white disabled:opacity-50"
+                                            >
+                                                <option value="">Select a registered machine...</option>
+                                                {machines.map((m) => (
+                                                    <option key={m.id} value={m.id}>
+                                                        {m.code_anydesk || m.nom_poste}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        )}
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setCreateNewMachine(!createNewMachine);
+                                                setNewTicket({ ...newTicket, machine_id: '', code_anydesk: '' });
+                                            }}
+                                            className="mt-2 text-sm text-primary hover:text-orange-600 font-medium flex items-center gap-1"
+                                        >
+                                            <span className="material-symbols-outlined text-sm">
+                                                {createNewMachine ? 'arrow_back' : 'add'}
+                                            </span>
+                                            {createNewMachine ? 'Select Existing Machine' : 'Add New Machine'}
+                                        </button>
                                     </div>
                                     <div>
                                         <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">

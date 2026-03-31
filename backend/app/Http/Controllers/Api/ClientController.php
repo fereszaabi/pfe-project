@@ -55,6 +55,26 @@ class ClientController extends Controller
     }
 
     /**
+     * Get client's registered machines
+     */
+    public function getMachines(Request $request)
+    {
+        $user = $request->user();
+        $client = Client::where('cin', $user->cin)->first();
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
+
+        $machines = Machine::where('id_client', $client->id)
+            ->select(['id', 'code_anydesk', 'nom_poste', 'created_at'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        return response()->json(['machines' => $machines]);
+    }
+
+    /**
      * Store a newly created resource in storage.
      */
     public function store(Request $request)
@@ -73,19 +93,29 @@ class ClientController extends Controller
             $imagePath = $request->file('image')->store('demandes', 'public');
         }
 
-        // Try to find existing machine, or create it if it doesn't exist
-        $machine = Machine::firstOrCreate(
-            [
+        // Handle machine selection or creation
+        $machineId = null;
+        
+        if ($request->machine_id) {
+            // Use existing machine
+            $machine = Machine::find($request->machine_id);
+            if (!$machine || $machine->id_client !== $clientId) {
+                return response()->json(['error' => 'Invalid machine'], 422);
+            }
+            $machineId = $machine->id;
+        } elseif ($request->code_anydesk) {
+            // Create new machine with anydesk code
+            $machine = Machine::create([
                 'id_client' => $clientId,
-                'nom_poste' => $request->nom_poste,
-            ],
-            [
-                'code_anydesk' => null, // Will be added later by admin/client
-            ]
-        );
+                'code_anydesk' => $request->code_anydesk,
+                'nom_poste' => $request->code_anydesk, // Use code as name
+            ]);
+            $machineId = $machine->id;
+        } else {
+            return response()->json(['error' => 'Machine ID or AnyDesk code required'], 422);
+        }
 
-        // Check if client has insufficient funds (starting balance check)
-        // Ticket starts at 0 cost, but we flag if client balance is already negative
+        // Check if client has insufficient funds
         $hasInsufficientFunds = $client->money < 0;
 
         $demande = Demande::create([
@@ -93,16 +123,16 @@ class ClientController extends Controller
             'titre'                 => $request->titre,
             'id_employee'           => null,
             'priority'              => $request->priority,
-            'id_machine'            => $machine->id,
+            'id_machine'            => $machineId,
             'description'           => $request->description,
             'image'                 => $imagePath,
             'status'                => 'submitted',
-            'ticket_cost'           => 0, // Start at 0
-            'total_cost'            => 0, // Start at 0
-            'payment_status'        => 'pending', // Default to pending until admin sets cost
+            'ticket_cost'           => 0,
+            'total_cost'            => 0,
+            'payment_status'        => 'pending',
             'end_at'                => null,
             'employee_note'         => null,
-            'insufficient_funds'    => $hasInsufficientFunds, // Flag for insufficient funds
+            'insufficient_funds'    => $hasInsufficientFunds,
             'created_at'            => now(),
         ]);
 

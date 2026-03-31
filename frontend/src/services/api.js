@@ -65,6 +65,9 @@ export const deleteTicket = (id) =>
     apiRequest('DELETE', `/client/tickets/${id}`);
 
 // ── Machines ────────────────────────────────────────────────────────
+export const getMachines = () =>
+    apiRequest('GET', '/client/machines');
+
 export const getClientMachines = () =>
     apiRequest('GET', '/client/machines');
 

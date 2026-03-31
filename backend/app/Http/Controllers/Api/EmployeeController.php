@@ -138,23 +138,29 @@ class EmployeeController extends Controller
     }
 
     /**
-     * Update ticket status
+     * Update ticket status - any employee can update any ticket
      */
     public function update(Request $request, Demande $demande)
     {
-        // Only the assigned employee can update their tickets
-        if ($demande->id_employee !== $request->user()->id) {
-            return response()->json([
-                'message' => 'You can only update tickets assigned to you',
-            ], 403);
-        }
-
         $request->validate([
             'status' => 'required|string|in:submitted,in progress,resolved,closed',
             'employee_note' => 'nullable|string',
         ]);
 
-        $oldStatus = $demande->status;
+        $currentUserId = $request->user()->id;
+
+        // If ticket is currently unassigned and employee wants to update status,
+        // automatically assign it to them
+        if ($demande->id_employee === null && in_array($request->status, ['in progress', 'resolved', 'closed'])) {
+            $demande->update([
+                'id_employee' => $currentUserId,
+                'assigned_at' => Carbon::now(),
+            ]);
+            
+            // Update employee workload
+            $employee = User::find($currentUserId);
+            $employee->increment('current_workload');
+        }
 
         $demande->update([
             'status' => $request->status,
@@ -173,11 +179,15 @@ class EmployeeController extends Controller
                 $demande->update(['resolution_hours' => round($hours, 2)]);
             }
 
-            // Update employee performance
-            $employee = User::find($request->user()->id);
-            $employee->decrement('current_workload');
-            $employee->update(['last_ticket_completed' => Carbon::now()]);
-            $employee->recalculatePerformance();
+            // Update the assigned employee's performance
+            if ($demande->id_employee) {
+                $employee = User::find($demande->id_employee);
+                if ($employee) {
+                    $employee->decrement('current_workload');
+                    $employee->update(['last_ticket_completed' => Carbon::now()]);
+                    $employee->recalculatePerformance();
+                }
+            }
         }
 
         return response()->json($demande->fresh()->load(['client', 'employee', 'machine']));
