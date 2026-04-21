@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
-import { getClientMachines, createMachine, updateMachine, deleteMachine } from '../../services/api';
+import { getClientMachines, createMachine, updateMachine, deleteMachine, getClientProfile } from '../../services/api';
 
 export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
     const [showPassword, setShowPassword] = useState(false);
     const [profileData, setProfileData] = useState({
-        businessName: user?.name || 'Gourmet Haven Ltd.',
-        email: user?.email || 'contact@gourmethaven.com',
+        businessName: user?.name || '',
+        email: user?.email || '',
         phone: '71 000 000',
         businessType: 'Restaurant/Retail',
         currentPassword: '',
@@ -19,11 +19,32 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
     const [newCode, setNewCode] = useState({ label: '', code: '' });
     const [savingCode, setSavingCode] = useState(false);
     const [deleteError, setDeleteError] = useState(null);
+    const [clientBalance, setClientBalance] = useState(Number(user?.money ?? 0));
 
     // Load machines on component mount
     useEffect(() => {
+        loadProfile();
         loadMachines();
     }, []);
+
+    const loadProfile = async () => {
+        try {
+            const data = await getClientProfile();
+            const profile = data?.profile;
+
+            if (profile) {
+                setClientBalance(Number(profile.money ?? 0));
+                setProfileData((prev) => ({
+                    ...prev,
+                    businessName: profile.nom || prev.businessName,
+                    email: profile.email || profile.mail || prev.email,
+                    businessType: profile.business_type || prev.businessType,
+                }));
+            }
+        } catch (err) {
+            console.error('Error loading profile:', err);
+        }
+    };
 
     const loadMachines = async () => {
         try {
@@ -181,7 +202,7 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
                                 <div className="flex justify-between items-start mb-6">
                                     <div>
                                         <p className="text-white/80 text-xs font-bold uppercase tracking-widest">Available Balance</p>
-                                        <h4 className="text-3xl font-black mt-1">2,450.000 <span className="text-sm font-normal">TND</span></h4>
+                                        <h4 className="text-3xl font-black mt-1">{clientBalance.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })} <span className="text-sm font-normal">TND</span></h4>
                                     </div>
                                     <span className="material-symbols-outlined text-white/40 text-3xl">account_balance_wallet</span>
                                 </div>

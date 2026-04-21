@@ -16,11 +16,14 @@ class Message extends Model
     protected $fillable = [
         'conversation_id',
         'sender_id',
+        'sender_type',
         'recipient_id',
+        'recipient_type',
         'message',
         'is_read',
         'read_at',
         'created_at',
+        'ticket_id',
     ];
 
     protected $casts = [
@@ -38,19 +41,65 @@ class Message extends Model
     }
 
     /**
-     * Get the sender
+     * Get the ticket this message relates to
      */
-    public function sender()
+    public function demande()
     {
-        return $this->belongsTo(User::class, 'sender_id');
+        return $this->belongsTo(Demande::class, 'ticket_id');
     }
 
     /**
-     * Get the recipient
+     * Get the sender (can be from users, employees, or clients table)
+     */
+    public function sender()
+    {
+        // Use sender_type if available for more efficient lookup
+        if ($this->sender_type) {
+            return match ($this->sender_type) {
+                'employee' => \App\Models\Employee::find($this->sender_id),
+                'client' => \App\Models\Client::find($this->sender_id),
+                'user' => User::find($this->sender_id),
+                default => User::find($this->sender_id),
+            };
+        }
+
+        // Fallback: Try to get from users table first
+        $user = User::find($this->sender_id);
+        if ($user) return $user;
+        
+        // Try employees table
+        $employee = \App\Models\Employee::find($this->sender_id);
+        if ($employee) return $employee;
+        
+        // Try clients table
+        return \App\Models\Client::find($this->sender_id);
+    }
+
+    /**
+     * Get the recipient (can be from users, employees, or clients table)
      */
     public function recipient()
     {
-        return $this->belongsTo(User::class, 'recipient_id');
+        // Use recipient_type if available for more efficient lookup
+        if ($this->recipient_type) {
+            return match ($this->recipient_type) {
+                'employee' => \App\Models\Employee::find($this->recipient_id),
+                'client' => \App\Models\Client::find($this->recipient_id),
+                'user' => User::find($this->recipient_id),
+                default => User::find($this->recipient_id),
+            };
+        }
+
+        // Fallback: Try to get from users table first
+        $user = User::find($this->recipient_id);
+        if ($user) return $user;
+        
+        // Try employees table
+        $employee = \App\Models\Employee::find($this->recipient_id);
+        if ($employee) return $employee;
+        
+        // Try clients table
+        return \App\Models\Client::find($this->recipient_id);
     }
 
     /**
@@ -72,19 +121,27 @@ class Message extends Model
      */
     public function formatForResponse()
     {
+        $sender = $this->sender();
+        $recipient = $this->recipient();
+        
         return [
             'id' => $this->id,
             'conversation_id' => $this->conversation_id,
-            'sender' => [
-                'id' => $this->sender_id,
-                'name' => $this->sender->name,
-                'email' => $this->sender->email,
-            ],
-            'recipient' => [
-                'id' => $this->recipient_id,
-                'name' => $this->recipient->name,
-                'email' => $this->recipient->email,
-            ],
+            'ticket_id' => $this->ticket_id,
+            'sender_id' => $this->sender_id,
+            'sender_type' => $this->sender_type,
+            'recipient_id' => $this->recipient_id,
+            'recipient_type' => $this->recipient_type,
+            'sender' => $sender ? [
+                'id' => $sender->id,
+                'name' => $sender->name,
+                'email' => $sender->email ?? $sender->mail ?? null,
+            ] : null,
+            'recipient' => $recipient ? [
+                'id' => $recipient->id,
+                'name' => $recipient->name,
+                'email' => $recipient->email ?? $recipient->mail ?? null,
+            ] : null,
             'message' => $this->message,
             'is_read' => $this->is_read,
             'read_at' => $this->read_at,

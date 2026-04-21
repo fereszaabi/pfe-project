@@ -1,8 +1,20 @@
-import { useState, useEffect } from 'react';
-import { getClientTickets, createTicket, rateEmployee, getMachines } from '../../services/api';
+import { useState, useEffect, useRef } from 'react';
+import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot } from '../../services/api';
 
 export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, activeView }) {
+    const promptedRatingTicketsRef = useRef(new Set());
+    const supportMessagesEndRef = useRef(null);
     const [showCreateTicket, setShowCreateTicket] = useState(false);
+    const [showSupportChat, setShowSupportChat] = useState(false);
+    const [supportInput, setSupportInput] = useState('');
+    const [isBotReplying, setIsBotReplying] = useState(false);
+    const [supportMessages, setSupportMessages] = useState([
+        {
+            id: 'welcome',
+            role: 'assistant',
+            content: 'Hi! I am your quick support assistant. Tell me what issue you are facing and I will help you troubleshoot it.',
+        },
+    ]);
     const [tickets, setTickets] = useState([]);
     const [loadingTickets, setLoadingTickets] = useState(true);
     const [machines, setMachines] = useState([]);
@@ -12,7 +24,9 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [ratingTicket, setRatingTicket] = useState(null);
     const [ratingValue, setRatingValue] = useState(0);
     const [ratingComment, setRatingComment] = useState('');
+    const [ratingError, setRatingError] = useState('');
     const [isSubmittingRating, setIsSubmittingRating] = useState(false);
+    const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
     const [newTicket, setNewTicket] = useState({
         titre: '',
         description: '',
@@ -25,12 +39,53 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const priorityFees = { low: 10, medium: 20, high: 25, urgent: 30 };
 
     useEffect(() => {
-        setLoadingTickets(true);
-        getClientTickets()
-            .then((data) => setTickets(data.demandes?.data ?? data.demandes ?? []))
-            .catch(() => setTickets([]))
-            .finally(() => setLoadingTickets(false));
+        let isMounted = true;
+
+        const fetchTickets = async (showLoader = false) => {
+            if (showLoader) {
+                setLoadingTickets(true);
+            }
+            try {
+                const data = await getClientTickets();
+                if (isMounted) {
+                    setTickets(data.demandes?.data ?? data.demandes ?? []);
+                }
+            } catch (_) {
+                if (isMounted) {
+                    setTickets([]);
+                }
+            } finally {
+                if (showLoader && isMounted) {
+                    setLoadingTickets(false);
+                }
+            }
+        };
+
+        fetchTickets(true);
+        const intervalId = setInterval(() => fetchTickets(false), 5000);
+
+        return () => {
+            isMounted = false;
+            clearInterval(intervalId);
+        };
     }, []);
+
+    useEffect(() => {
+        supportMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [supportMessages, showSupportChat]);
+
+    useEffect(() => {
+        if (!showSupportChat) return;
+
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                setShowSupportChat(false);
+            }
+        };
+
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [showSupportChat]);
 
     useEffect(() => {
         if (showCreateTicket) {
@@ -41,6 +96,48 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 .finally(() => setLoadingMachines(false));
         }
     }, [showCreateTicket]);
+
+    useEffect(() => {
+        if (ratingTicket) {
+            return;
+        }
+
+        const ticketNeedingRating = tickets.find(
+            (ticket) =>
+                ['resolved', 'closed'].includes(ticket.status) &&
+                !ticket.client_rating &&
+                !promptedRatingTicketsRef.current.has(ticket.id)
+        );
+
+        if (ticketNeedingRating) {
+            promptedRatingTicketsRef.current.add(ticketNeedingRating.id);
+            setRatingTicket(ticketNeedingRating);
+            setRatingValue(0);
+            setRatingComment('');
+            setRatingError('');
+        }
+    }, [tickets, ratingTicket]);
+
+    useEffect(() => {
+        let isMounted = true;
+
+        const fetchUnread = async () => {
+            try {
+                const data = await getUnreadMessages();
+                if (isMounted) {
+                    setUnreadMessagesCount(Number(data?.total_unread ?? 0));
+                }
+            } catch (_) {}
+        };
+
+        fetchUnread();
+        const intervalId = setInterval(fetchUnread, 5000);
+
+        return () => {
+            isMounted = false;
+            clearInterval(intervalId);
+        };
+    }, []);
 
     const handleImageChange = (e) => {
         const file = e.target.files[0];
@@ -79,6 +176,12 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             setCreateNewMachine(false);
             setShowCreateTicket(false);
         } catch (err) {
+            if (err?.message === 'Unauthenticated.') {
+                setSubmitError('Session expired. Please sign in again.');
+                await onLogout?.();
+                return;
+            }
+
             const msg = err?.errors
                 ? Object.values(err.errors).flat().join(' ')
                 : err?.message || 'Failed to submit ticket.';
@@ -90,18 +193,79 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         if (!ratingTicket || ratingValue === 0) return;
 
         setIsSubmittingRating(true);
+        setRatingError('');
         try {
-            await rateEmployee(ratingTicket.id, ratingValue);
-            // Refresh tickets
-            const data = await getClientTickets();
-            setTickets(data.demandes?.data ?? data.demandes ?? []);
+            const response = await rateEmployee(
+                ratingTicket.id,
+                ratingValue,
+                ratingComment.trim()
+            );
+            const updatedTicket = response?.ticket;
+
+            if (updatedTicket?.id) {
+                setTickets((prev) =>
+                    prev.map((ticket) =>
+                        ticket.id === updatedTicket.id ? { ...ticket, ...updatedTicket } : ticket
+                    )
+                );
+            } else {
+                const data = await getClientTickets();
+                setTickets(data.demandes?.data ?? data.demandes ?? []);
+            }
+
             setRatingTicket(null);
             setRatingValue(0);
             setRatingComment('');
         } catch (err) {
-            console.error('Failed to submit rating:', err);
+            const message = err?.message || 'Failed to submit rating.';
+            setRatingError(message);
         } finally {
             setIsSubmittingRating(false);
+        }
+    };
+
+    const handleSendSupportMessage = async () => {
+        const trimmed = supportInput.trim();
+        if (!trimmed || isBotReplying) return;
+
+        const userMsg = {
+            id: `user-${Date.now()}`,
+            role: 'user',
+            content: trimmed,
+        };
+
+        setSupportMessages((prev) => [...prev, userMsg]);
+        setSupportInput('');
+        setIsBotReplying(true);
+
+        try {
+            const history = [...supportMessages, userMsg]
+                .slice(-12)
+                .map((m) => ({ role: m.role, content: m.content }));
+
+            const response = await askSupportBot(trimmed, history);
+            const botReply = response?.reply || 'I could not generate a response right now. Please try again.';
+
+            setSupportMessages((prev) => [
+                ...prev,
+                {
+                    id: `assistant-${Date.now()}`,
+                    role: 'assistant',
+                    content: botReply,
+                },
+            ]);
+        } catch (err) {
+            const errorMessage = err?.message || 'Quick support is temporarily unavailable. Please try again later.';
+            setSupportMessages((prev) => [
+                ...prev,
+                {
+                    id: `assistant-error-${Date.now()}`,
+                    role: 'assistant',
+                    content: errorMessage,
+                },
+            ]);
+        } finally {
+            setIsBotReplying(false);
         }
     };
 
@@ -183,7 +347,11 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     <div className="flex items-center gap-4">
                         <button className="relative p-2 text-slate-500 hover:text-primary transition-colors">
                             <span className="material-symbols-outlined">notifications</span>
-                            <span className="absolute top-2 right-2 w-2 h-2 bg-primary rounded-full ring-2 ring-white dark:ring-background-dark"></span>
+                            {unreadMessagesCount > 0 && (
+                                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 bg-primary text-white rounded-full ring-2 ring-white dark:ring-background-dark text-[10px] font-bold leading-[14px] flex items-center justify-center">
+                                    {unreadMessagesCount > 99 ? '99+' : unreadMessagesCount}
+                                </span>
+                            )}
                         </button>
                         <div className="h-8 w-px bg-slate-200 dark:bg-slate-800 mx-2"></div>
                         <div className="flex items-center gap-3 cursor-pointer">
@@ -244,7 +412,10 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                     <p className="text-white/80 text-sm font-medium">Need Help?</p>
                                     <h3 className="text-2xl font-bold text-white mt-1">Quick Support</h3>
                                 </div>
-                                <button className="mt-4 w-full py-2 bg-white text-primary font-bold rounded-lg hover:bg-slate-50 transition-colors">
+                                <button
+                                    onClick={() => setShowSupportChat(true)}
+                                    className="mt-4 w-full py-2 bg-white text-primary font-bold rounded-lg hover:bg-slate-50 transition-colors"
+                                >
                                     Start Live Chat
                                 </button>
                             </div>
@@ -487,7 +658,12 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                                 <td className="px-6 py-4 text-right flex items-center justify-end gap-2">
                                                     {ticket.status === 'resolved' && !ticket.client_rating ? (
                                                         <button
-                                                            onClick={() => setRatingTicket(ticket)}
+                                                            onClick={() => {
+                                                                setRatingTicket(ticket);
+                                                                setRatingValue(0);
+                                                                setRatingComment('');
+                                                                setRatingError('');
+                                                            }}
                                                             className="text-amber-500 hover:text-amber-600 transition-colors flex items-center gap-1"
                                                             title="Rate this service"
                                                         >
@@ -522,16 +698,22 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
             {/* Rating Modal */}
             {ratingTicket && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setRatingTicket(null)}>
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => { setRatingTicket(null); setRatingError(''); }}>
                     <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl max-w-md w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
                         <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
                             <h3 className="text-lg font-bold text-slate-900 dark:text-white">Rate Your Experience</h3>
-                            <button onClick={() => setRatingTicket(null)} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors">
+                            <button onClick={() => { setRatingTicket(null); setRatingError(''); }} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors">
                                 <span className="material-symbols-outlined">close</span>
                             </button>
                         </div>
 
                         <div className="p-6 space-y-6">
+                            {ratingError && (
+                                <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-600 dark:text-red-400">
+                                    {ratingError}
+                                </div>
+                            )}
+
                             <div>
                                 <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">How satisfied are you with the support provided?</p>
                                 <div className="flex justify-center gap-2">
@@ -575,7 +757,10 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
                             <div className="flex gap-3 justify-end">
                                 <button
-                                    onClick={() => setRatingTicket(null)}
+                                    onClick={() => {
+                                        setRatingTicket(null);
+                                        setRatingError('');
+                                    }}
                                     className="px-6 py-2 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                                 >
                                     Cancel
@@ -589,6 +774,64 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                     Submit Rating
                                 </button>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {showSupportChat && (
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowSupportChat(false)}>
+                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                        <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Quick Support Live Chat</h3>
+                                <p className="text-xs text-slate-500">Powered by support assistant</p>
+                            </div>
+                            <button onClick={() => setShowSupportChat(false)} className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors">
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        <div className="h-[420px] overflow-y-auto p-4 bg-slate-50 dark:bg-slate-900/40 space-y-3">
+                            {supportMessages.map((msg) => (
+                                <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[80%] px-4 py-2 rounded-xl text-sm ${msg.role === 'user' ? 'bg-primary text-white rounded-br-sm' : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-bl-sm border border-slate-200 dark:border-slate-700'}`}>
+                                        {msg.content}
+                                    </div>
+                                </div>
+                            ))}
+
+                            {isBotReplying && (
+                                <div className="flex justify-start">
+                                    <div className="px-4 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-500">
+                                        Assistant is typing...
+                                    </div>
+                                </div>
+                            )}
+                            <div ref={supportMessagesEndRef} />
+                        </div>
+
+                        <div className="p-4 border-t border-slate-200 dark:border-slate-800 flex gap-2">
+                            <input
+                                type="text"
+                                value={supportInput}
+                                onChange={(e) => setSupportInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        handleSendSupportMessage();
+                                    }
+                                }}
+                                placeholder="Describe your issue..."
+                                className="flex-1 px-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white"
+                            />
+                            <button
+                                onClick={handleSendSupportMessage}
+                                disabled={isBotReplying || !supportInput.trim()}
+                                className="px-4 py-2.5 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                Send
+                            </button>
                         </div>
                     </div>
                 </div>

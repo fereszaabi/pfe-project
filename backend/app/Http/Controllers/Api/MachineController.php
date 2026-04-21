@@ -25,7 +25,7 @@ class MachineController extends Controller
             ->select(['id', 'nom_poste', 'code_anydesk', 'created_at', 'updated_at'])
             ->get();
 
-        return response()->json($machines);
+        return response()->json(['machines' => $machines]);
     }
 
     /**

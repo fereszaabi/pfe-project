@@ -11,79 +11,113 @@ use Carbon\Carbon;
 class EmployeeController extends Controller
 {
     /**
+     * Resolve the employee actor id used in demandes.id_employee.
+     */
+    private function resolveEmployeeActorId($user)
+    {
+        if ($user instanceof \App\Models\Employee) {
+            return $user->id;
+        }
+
+        $employee = \App\Models\Employee::where('cin', $user->cin ?? null)
+            ->orWhere('mail', $user->email ?? null)
+            ->first();
+
+        if ($employee) {
+            return $employee->id;
+        }
+
+        return $user->id;
+    }
+
+    /**
      * Display all tickets (assigned + unassigned) with ticket details
      * All employees and admin can see all tickets
      */
     public function index(Request $request)
     {
-        $userId = $request->user()->id;
+        $user = $request->user();
+        
+        // Get the employee ID from the current user
+        $employeeId = null;
+        if ($user instanceof \App\Models\Employee) {
+            $employeeId = $user->id;
+        } else {
+            // If user is authenticated via users table, find the corresponding Employee record
+            $employee = \App\Models\Employee::where('email', $user->email)
+                ->orWhere('cin', $user->cin ?? null)
+                ->first();
+            if ($employee) {
+                $employeeId = $employee->id;
+            }
+        }
 
         // Get all tickets with employee and client info
         $allDemandes = Demande::with(['client', 'employee', 'machine'])
-            ->select([
-                'id',
-                'titre',
-                'status',
-                'description',
-                'priority',
-                'employee_note',
-                'created_at',
-                'assigned_at',
-                'completed_at',
-                'resolution_hours',
-                'client_rating',
-                'image',
-                'id_client',
-                'id_employee',
-                'id_machine',
-            ])
             ->orderBy('created_at', 'desc')
             ->paginate(15);
 
-        // Get employee's assigned tickets separately for quick access
-        $myDemandes = Demande::where('id_employee', $userId)
-            ->with(['client', 'employee', 'machine'])
-            ->select([
-                'id',
-                'titre',
-                'status',
-                'description',
-                'priority',
-                'employee_note',
-                'created_at',
-                'assigned_at',
-                'completed_at',
-                'resolution_hours',
-                'client_rating',
-                'image',
-                'id_client',
-                'id_employee',
-                'id_machine',
-            ])
-            ->orderBy('assigned_at', 'desc')
-            ->paginate(10);
+        // Get employee's assigned tickets - use the correct employee ID
+        $myDemandes = $employeeId 
+            ? Demande::where('id_employee', $employeeId)
+                ->whereNotNull('assigned_at')
+                ->with(['client', 'employee', 'machine'])
+                ->orderBy('assigned_at', 'desc')
+                ->paginate(10)
+            : [];
 
         // Get unassigned tickets for quick claiming
         $unassignedDemandes = Demande::whereNull('id_employee')
             ->with(['client', 'machine'])
-            ->select([
-                'id',
-                'titre',
-                'status',
-                'description',
-                'priority',
-                'created_at',
-                'image',
-                'id_client',
-                'id_machine',
-            ])
             ->orderBy('created_at', 'desc')
             ->paginate(10);
+
+        // Get all claimed tickets (assigned to any employee)
+        $claimedDemandes = Demande::whereNotNull('id_employee')
+            ->with(['client', 'employee', 'machine'])
+            ->orderBy('assigned_at', 'desc')
+            ->paginate(15);
 
         return response()->json([
             'all_tickets' => $allDemandes,
             'my_tickets' => $myDemandes,
+            'claimed_tickets' => $claimedDemandes,
             'unassigned_tickets' => $unassignedDemandes,
+        ]);
+    }
+
+    /**
+     * Dedicated IT endpoint: escalated queue + onsite queue for employee/admin views.
+     */
+    public function itTickets(Request $request)
+    {
+        $role = $request->user()->role;
+
+        if (!in_array($role, ['employee', 'admin'], true)) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+
+        $allTickets = Demande::with(['client', 'employee', 'machine'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        $escalatedTickets = $allTickets
+            ->filter(fn ($ticket) => in_array($ticket->status, ['escalated', 'tech'], true))
+            ->values();
+
+        $onsiteTickets = $allTickets
+            ->filter(fn ($ticket) => !in_array($ticket->status, ['resolved', 'escalated', 'tech'], true))
+            ->values();
+
+        return response()->json([
+            'all_tickets' => $allTickets,
+            'escalated_tickets' => $escalatedTickets,
+            'onsite_tickets' => $onsiteTickets,
+            'counts' => [
+                'all' => $allTickets->count(),
+                'escalated' => $escalatedTickets->count(),
+                'onsite' => $onsiteTickets->count(),
+            ],
         ]);
     }
 
@@ -99,17 +133,43 @@ class EmployeeController extends Controller
             ], 422);
         }
 
+        // Get the current employee - they might be authenticated as User or Employee
+        $user = $request->user();
+        
+        // If user is not directly an Employee, find the Employee record
+        $employeeId = null;
+        if ($user instanceof \App\Models\Employee) {
+            $employeeId = $user->id;
+        } else {
+            // Search for employee by email, cin, or name
+            $employee = \App\Models\Employee::where('email', $user->email)
+                ->orWhere('cin', $user->cin)
+                ->first();
+            
+            if (!$employee) {
+                return response()->json([
+                    'message' => 'Employee record not found for current user',
+                ], 404);
+            }
+            $employeeId = $employee->id;
+        }
+
         $demande->update([
-            'id_employee' => $request->user()->id,
+            'id_employee' => $employeeId,
             'assigned_at' => Carbon::now(),
             'status' => 'in progress', // automatically set to in progress when claimed
         ]);
 
         // Update employee workload
-        $employee = User::find($request->user()->id);
-        $employee->increment('current_workload');
+        $employee = \App\Models\Employee::find($employeeId);
+        if ($employee) {
+            $employee->increment('current_workload');
+        }
 
-        return response()->json($demande->fresh()->load(['client', 'employee', 'machine']));
+        return response()->json([
+            'message' => 'Ticket claimed successfully',
+            'data' => $demande->fresh()->load(['client', 'employee', 'machine']),
+        ], 200);
     }
 
     /**
@@ -117,8 +177,27 @@ class EmployeeController extends Controller
      */
     public function unclaim(Request $request, Demande $demande)
     {
+        // Get the current employee
+        $user = $request->user();
+        $employeeId = null;
+        
+        if ($user instanceof \App\Models\Employee) {
+            $employeeId = $user->id;
+        } else {
+            $employee = \App\Models\Employee::where('email', $user->email)
+                ->orWhere('cin', $user->cin)
+                ->first();
+            
+            if (!$employee) {
+                return response()->json([
+                    'message' => 'Employee record not found',
+                ], 404);
+            }
+            $employeeId = $employee->id;
+        }
+
         // Only the assigned employee can unclaim
-        if ($demande->id_employee !== $request->user()->id) {
+        if ($demande->id_employee !== $employeeId) {
             return response()->json([
                 'message' => 'You can only unclaim your own tickets',
             ], 403);
@@ -131,8 +210,10 @@ class EmployeeController extends Controller
         ]);
 
         // Update employee workload
-        $employee = User::find($request->user()->id);
-        $employee->decrement('current_workload');
+        $employee = \App\Models\Employee::find($employeeId);
+        if ($employee) {
+            $employee->decrement('current_workload');
+        }
 
         return response()->json($demande->fresh()->load(['client', 'machine']));
     }
@@ -143,15 +224,17 @@ class EmployeeController extends Controller
     public function update(Request $request, Demande $demande)
     {
         $request->validate([
-            'status' => 'required|string|in:submitted,in progress,resolved,closed',
+            'status' => 'required|string|in:submitted,in progress,resolved,closed,escalated,tech',
             'employee_note' => 'nullable|string',
         ]);
+
+        $normalizedStatus = $request->status === 'tech' ? 'escalated' : $request->status;
 
         $currentUserId = $request->user()->id;
 
         // If ticket is currently unassigned and employee wants to update status,
         // automatically assign it to them
-        if ($demande->id_employee === null && in_array($request->status, ['in progress', 'resolved', 'closed'])) {
+        if ($demande->id_employee === null && in_array($normalizedStatus, ['in progress', 'resolved', 'closed'])) {
             $demande->update([
                 'id_employee' => $currentUserId,
                 'assigned_at' => Carbon::now(),
@@ -163,12 +246,12 @@ class EmployeeController extends Controller
         }
 
         $demande->update([
-            'status' => $request->status,
+            'status' => $normalizedStatus,
             'employee_note' => $request->employee_note ?? $demande->employee_note,
         ]);
 
         // Handle completion
-        if (in_array($request->status, ['resolved', 'closed']) && !$demande->completed_at) {
+        if (in_array($normalizedStatus, ['resolved', 'closed']) && !$demande->completed_at) {
             $demande->update([
                 'completed_at' => Carbon::now(),
             ]);
@@ -200,6 +283,7 @@ class EmployeeController extends Controller
     {
         $request->validate([
             'rating' => 'required|integer|min:1|max:5',
+            'rating_comment' => 'nullable|string|max:1000',
         ]);
 
         if (!in_array($demande->status, ['resolved', 'closed'])) {
@@ -208,7 +292,16 @@ class EmployeeController extends Controller
             ], 422);
         }
 
-        $demande->update(['client_rating' => $request->rating]);
+        if (!is_null($demande->client_rating)) {
+            return response()->json([
+                'message' => 'This ticket has already been rated',
+            ], 422);
+        }
+
+        $demande->update([
+            'client_rating' => $request->rating,
+            'rating_comment' => $request->input('rating_comment'),
+        ]);
 
         // Recalculate employee performance
         if ($demande->id_employee) {
@@ -231,10 +324,38 @@ class EmployeeController extends Controller
      */
     public function stats(Request $request)
     {
-        $employee = User::find($request->user()->id);
-        $employee->recalculatePerformance();
+        $user = $request->user();
+        $employeeActorId = $this->resolveEmployeeActorId($user);
 
-        return response()->json($employee->getPerformanceSummary());
+        $completedQuery = Demande::where('id_employee', $employeeActorId)
+            ->whereIn('status', ['resolved', 'closed']);
+
+        $ticketsCompleted = (clone $completedQuery)->count();
+        $avgRating = (float) ((clone $completedQuery)
+            ->whereNotNull('client_rating')
+            ->avg('client_rating') ?? 0);
+        $avgResolutionHours = (float) ((clone $completedQuery)
+            ->whereNotNull('resolution_hours')
+            ->avg('resolution_hours') ?? 0);
+
+        $currentWorkload = Demande::where('id_employee', $employeeActorId)
+            ->whereNotIn('status', ['resolved', 'closed'])
+            ->count();
+
+        $lastTicketCompleted = (clone $completedQuery)->max('completed_at');
+
+        return response()->json([
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'tickets_completed' => (int) $ticketsCompleted,
+            'avg_rating' => round($avgRating, 2),
+            'avg_resolution_hours' => round($avgResolutionHours, 2),
+            'current_workload' => (int) $currentWorkload,
+            'total_earnings' => 0,
+            'performance_status' => 'active',
+            'last_ticket_completed' => $lastTicketCompleted,
+        ]);
     }
 
     /**
@@ -242,36 +363,51 @@ class EmployeeController extends Controller
      */
     public function leaderboard(Request $request)
     {
-        $limit = $request->get('limit', 10);
+        $limit = max(1, (int) $request->get('limit', 10));
 
-        $leaderboard = User::where('role', 'employee')
-            ->where('performance_status', 'active')
-            ->select([
-                'id',
-                'name',
-                'email',
-                'tickets_completed',
-                'avg_rating',
-                'avg_resolution_hours',
-                'current_workload',
-                'total_earnings',
-            ])
-            ->orderByDesc('avg_rating')
-            ->orderByDesc('tickets_completed')
-            ->limit($limit)
-            ->get()
-            ->map(function ($emp) {
-                return [
-                    'id' => $emp->id,
-                    'name' => $emp->name,
-                    'email' => $emp->email,
-                    'tickets_completed' => (int) $emp->tickets_completed,
-                    'avg_rating' => (float) $emp->avg_rating,
-                    'avg_resolution_hours' => (float) $emp->avg_resolution_hours,
-                    'current_workload' => (int) $emp->current_workload,
-                    'total_earnings' => (float) $emp->total_earnings,
-                ];
-            });
+        $employees = \App\Models\Employee::all();
+
+        $leaderboard = $employees->map(function ($employee) {
+            $completedQuery = Demande::where('id_employee', $employee->id)
+                ->whereIn('status', ['resolved', 'closed']);
+
+            $ticketsCompleted = (clone $completedQuery)->count();
+            $avgRating = (float) ((clone $completedQuery)
+                ->whereNotNull('client_rating')
+                ->avg('client_rating') ?? 0);
+            $avgResolutionHours = (float) ((clone $completedQuery)
+                ->whereNotNull('resolution_hours')
+                ->avg('resolution_hours') ?? 0);
+            $currentWorkload = Demande::where('id_employee', $employee->id)
+                ->whereNotIn('status', ['resolved', 'closed'])
+                ->count();
+
+            $userRecord = User::where('cin', $employee->cin)
+                ->orWhere('email', $employee->mail)
+                ->first();
+
+            $fallbackName = trim(($employee->nom ?? '') . ' ' . ($employee->prenom ?? ''));
+
+            return [
+                'id' => $userRecord?->id ?? $employee->id,
+                'name' => $userRecord?->name ?? ($fallbackName !== '' ? $fallbackName : 'Employee #' . $employee->id),
+                'email' => $userRecord?->email ?? $employee->mail,
+                'tickets_completed' => (int) $ticketsCompleted,
+                'avg_rating' => round($avgRating, 2),
+                'avg_resolution_hours' => round($avgResolutionHours, 2),
+                'current_workload' => (int) $currentWorkload,
+                'total_earnings' => (float) ($userRecord?->total_earnings ?? 0),
+            ];
+        })
+            ->sort(function ($a, $b) {
+                if ($a['avg_rating'] === $b['avg_rating']) {
+                    return $b['tickets_completed'] <=> $a['tickets_completed'];
+                }
+
+                return $b['avg_rating'] <=> $a['avg_rating'];
+            })
+            ->take($limit)
+            ->values();
 
         return response()->json(['leaderboard' => $leaderboard]);
     }

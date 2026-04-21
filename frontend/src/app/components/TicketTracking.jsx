@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
-import { getClientTicket, deleteTicket } from '../../services/api';
+import { useState, useEffect, useRef } from 'react';
+import { getClientTicket, deleteTicket, getTicketMessages, sendMessage } from '../../services/api';
 
 export function TicketTracking({ ticketId, onBack }) {
     const [ticket, setTicket] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [comment, setComment] = useState('');
+    const [postingUpdate, setPostingUpdate] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [notifications, setNotifications] = useState([]);
@@ -13,12 +14,167 @@ export function TicketTracking({ ticketId, onBack }) {
     const [showNotifications, setShowNotifications] = useState(false);
     const [previousStatus, setPreviousStatus] = useState(null);
     const [notificationToast, setNotificationToast] = useState(null);
+    const [conversationMessages, setConversationMessages] = useState([]);
+    const [loadingMessages, setLoadingMessages] = useState(false);
+    const [messageText, setMessageText] = useState('');
+    const [isSubmittingMessage, setIsSubmittingMessage] = useState(false);
+    const [showChat, setShowChat] = useState(false);
+    const messagesEndRef = useRef(null);
+    const lastSeenMessageIdRef = useRef(null);
+
+    const isMessageFromTechnician = (msg) => {
+        if (!msg) return false;
+
+        const senderType = msg.sender_type || msg.senderType;
+        if (senderType) {
+            return senderType === 'employee';
+        }
+
+        if (ticket?.id_employee && msg?.sender?.id) {
+            return Number(msg.sender.id) === Number(ticket.id_employee);
+        }
+
+        return false;
+    };
 
     useEffect(() => {
         loadTicket();
         const pollInterval = setInterval(checkForUpdates, 5000); // Poll every 5 seconds
         return () => clearInterval(pollInterval);
     }, [ticketId]);
+
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    };
+
+    useEffect(() => {
+        scrollToBottom();
+    }, [conversationMessages]);
+
+    useEffect(() => {
+        if (!ticketId) return;
+
+        const intervalId = setInterval(() => {
+            fetchConversationMessages({ silent: true });
+        }, 2000);
+
+        return () => clearInterval(intervalId);
+    }, [ticketId]);
+
+    const fetchConversationMessages = async (options = {}) => {
+        const { silent = false } = options;
+        try {
+            if (!silent) {
+                setLoadingMessages(true);
+            }
+            const data = await getTicketMessages(ticketId);
+            const msgs = Array.isArray(data.messages) ? data.messages : [];
+            setConversationMessages(msgs);
+
+            const latestMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+            if (latestMsg?.id) {
+                if (lastSeenMessageIdRef.current === null) {
+                    lastSeenMessageIdRef.current = latestMsg.id;
+                } else if (latestMsg.id !== lastSeenMessageIdRef.current && isMessageFromTechnician(latestMsg)) {
+                    const newNotification = {
+                        id: Date.now(),
+                        type: 'message',
+                        title: 'New Message',
+                        message: `New message from technician: ${latestMsg.message?.slice(0, 60) || ''}`,
+                        timestamp: new Date(),
+                        read: false,
+                    };
+                    setNotifications(prev => [newNotification, ...prev]);
+                    setUnreadCount(prev => prev + 1);
+                    setNotificationToast(newNotification);
+                    setTimeout(() => setNotificationToast(null), 5000);
+                    lastSeenMessageIdRef.current = latestMsg.id;
+                } else {
+                    lastSeenMessageIdRef.current = latestMsg.id;
+                }
+            }
+        } catch (err) {
+            console.error('Failed to fetch messages:', err);
+        } finally {
+            if (!silent) {
+                setLoadingMessages(false);
+            }
+        }
+    };
+
+    const handleSendMessage = async () => {
+        if (!messageText.trim()) {
+            console.warn('Message text is empty');
+            return;
+        }
+
+        if (!ticket?.id_employee) {
+            console.error('No employee assigned to this ticket', {
+                ticket,
+                id_employee: ticket?.id_employee,
+            });
+            return;
+        }
+
+        setIsSubmittingMessage(true);
+        try {
+            const payload = {
+                recipient_id: ticket.id_employee,
+                recipient_type: 'employee',
+                message: messageText,
+                ticket_id: ticketId,
+            };
+            console.log('Sending message with payload:', payload);
+            
+            const response = await sendMessage(payload);
+            console.log('Message sent successfully:', response);
+            
+            setMessageText('');
+            // Refresh messages
+            await fetchConversationMessages();
+        } catch (error) {
+            console.error('Failed to send message - Full error:', error);
+            const errorMessage = error?.message || error?.error || JSON.stringify(error);
+            console.error('Error details:', {
+                message: error?.message,
+                error: error?.error,
+                status: error?.status,
+                fullError: error,
+            });
+            alert(`Failed to send message:\n${errorMessage}`);
+        } finally {
+            setIsSubmittingMessage(false);
+        }
+    };
+
+    const handlePostUpdate = async () => {
+        if (!comment.trim()) {
+            return;
+        }
+
+        if (!ticket?.id_employee) {
+            alert('No technician is assigned yet, so update cannot be posted.');
+            return;
+        }
+
+        setPostingUpdate(true);
+        try {
+            await sendMessage({
+                recipient_id: ticket.id_employee,
+                recipient_type: 'employee',
+                message: comment.trim(),
+                ticket_id: ticketId,
+            });
+
+            setComment('');
+            await fetchConversationMessages();
+        } catch (error) {
+            const errorMessage = error?.message || error?.error || 'Failed to post update.';
+            alert(errorMessage);
+        } finally {
+            setPostingUpdate(false);
+        }
+    };
 
     const loadTicket = async () => {
         try {
@@ -29,6 +185,8 @@ export function TicketTracking({ ticketId, onBack }) {
             if (data.status && !previousStatus) {
                 setPreviousStatus(data.status);
             }
+            // Load messages for this ticket
+            await fetchConversationMessages();
         } catch (err) {
             console.error('Error loading ticket:', err);
             setError('Failed to load ticket details');
@@ -255,6 +413,9 @@ export function TicketTracking({ ticketId, onBack }) {
                                                             {notif.type === 'assignment' && (
                                                                 <span className="material-symbols-outlined text-emerald-500 text-xl">person_add</span>
                                                             )}
+                                                            {notif.type === 'message' && (
+                                                                <span className="material-symbols-outlined text-blue-500 text-xl">chat</span>
+                                                            )}
                                                         </div>
                                                         <div className="flex-1 min-w-0">
                                                             <div className="flex items-center justify-between">
@@ -320,9 +481,9 @@ export function TicketTracking({ ticketId, onBack }) {
                     </div>
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                <div className="flex flex-col lg:flex-row gap-8">
                     {/* Left Column: Main Content */}
-                    <div className="lg:col-span-8 space-y-8">
+                    <div className="flex-1 space-y-8">
                         {/* Timeline Tracking Interface */}
                         <section className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-8 shadow-sm">
                             <h3 className="text-lg font-bold mb-8 flex items-center gap-2">
@@ -460,134 +621,181 @@ export function TicketTracking({ ticketId, onBack }) {
                                     onChange={(e) => setComment(e.target.value)}
                                 ></textarea>
                                 <div className="flex justify-end mt-3">
-                                    <button className="bg-primary text-white px-5 py-2 rounded-lg text-sm font-bold shadow-md hover:bg-orange-600 transition-colors">Post Update</button>
+                                    <button
+                                        onClick={handlePostUpdate}
+                                        disabled={postingUpdate || !comment.trim()}
+                                        className="bg-primary text-white px-5 py-2 rounded-lg text-sm font-bold shadow-md hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        {postingUpdate ? 'Posting...' : 'Post Update'}
+                                    </button>
                                 </div>
                             </div>
                         </section>
                     </div>
 
-                    {/* Right Column: Sidebar */}
-                    <div className="lg:col-span-4 space-y-6">
-                        {/* Ticket Info Card */}
-                        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-6 shadow-sm">
-                            <h4 className="font-bold mb-4 uppercase text-xs text-slate-400 tracking-widest">Ticket Details</h4>
-                            <div className="space-y-4">
-                                <div className="flex justify-between items-center text-sm">
-                                    <span className="text-slate-500 dark:text-slate-400">Priority</span>
-                                    <span className="px-2 py-0.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-xs font-bold uppercase">
-                                        {ticket.priority || 'Medium'}
-                                    </span>
-                                </div>
-                                <div className="flex justify-between items-center text-sm">
-                                    <span className="text-slate-500 dark:text-slate-400">Title</span>
-                                    <span className="font-medium text-right">{ticket.titre}</span>
-                                </div>
-                                <div className="flex justify-between items-center text-sm">
-                                    <span className="text-slate-500 dark:text-slate-400">Machine</span>
-                                    <span className="font-medium text-right">
-                                        {ticket.machine?.nom_poste || 'N/A'}
-                                    </span>
-                                </div>
-                                <div className="flex justify-between items-center text-sm">
-                                    <span className="text-slate-500 dark:text-slate-400">Created</span>
-                                    <span className="font-medium text-right">
-                                        {new Date(ticket.created_at).toLocaleDateString()}
-                                    </span>
-                                </div>
+                    {/* Right Column: Chat Panel */}
+                    <div className="w-96 shrink-0 hidden lg:block">
+                        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl shadow-sm overflow-hidden flex flex-col h-96 sticky top-24">
+                            {/* Chat Header */}
+                            <div className="p-4 border-b border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-800">
+                                <h4 className="font-bold text-sm flex items-center gap-2">
+                                    <span className="material-symbols-outlined text-primary">chat</span>
+                                    Technician Chat
+                                </h4>
+                                {ticket.employee && (
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                        Chat with {ticket.employee.name}
+                                    </p>
+                                )}
                             </div>
-                        </div>
 
-                        {/* Assigned Technician with Progress */}
-                        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-6 shadow-sm">
-                            <h4 className="font-bold mb-4 uppercase text-xs text-slate-400 tracking-widest">Assigned Technician</h4>
-                            {ticket.employee ? (
-                                <>
-                                    {/* Progress Bar with Agent Name */}
-                                    <div className="mb-6">
-                                        <div className="flex items-center justify-between mb-2">
-                                            <div className="flex items-center gap-2">
-                                                <span className="material-symbols-outlined text-primary text-lg">person</span>
-                                                <span className="font-bold text-sm text-slate-900 dark:text-white">{ticket.employee.name}</span>
+                            {/* Messages Container */}
+                            <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50 dark:bg-slate-900/30">
+                                {loadingMessages ? (
+                                    <div className="flex items-center justify-center h-full">
+                                        <span className="text-xs text-slate-400">Loading messages...</span>
+                                    </div>
+                                ) : conversationMessages.length === 0 ? (
+                                    <div className="flex items-center justify-center h-full text-center">
+                                        <p className="text-xs text-slate-400">No messages yet. Start the conversation!</p>
+                                    </div>
+                                ) : (
+                                    conversationMessages.map((msg, index) => {
+                                        const isFromTechnician = isMessageFromTechnician(msg);
+                                        return (
+                                            <div key={index} className={`flex ${isFromTechnician ? 'justify-start' : 'justify-end'}`}>
+                                                <div
+                                                    className={`max-w-xs px-3 py-2 rounded-lg text-sm ${
+                                                        isFromTechnician
+                                                            ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white border border-slate-200 dark:border-slate-700'
+                                                            : 'bg-primary text-white'
+                                                    }`}
+                                                >
+                                                    <p className="break-words">{msg.message}</p>
+                                                    <p className={`text-xs mt-1 ${isFromTechnician ? 'text-slate-500 dark:text-slate-400' : 'text-white/70'}`}>
+                                                        {msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                                                    </p>
+                                                </div>
                                             </div>
-                                            <span className="text-xs font-bold text-slate-500 dark:text-slate-400">
-                                                {ticket.status === 'open' ? '0%' : 
-                                                 ticket.status === 'in progress' || ticket.status === 'in-progress' ? '50%' : 
-                                                 ticket.status === 'resolved' ? '100%' : '0%'}
-                                            </span>
-                                        </div>
-                                        <div className="w-full h-3 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden border border-slate-200 dark:border-slate-700">
-                                            <div 
-                                                className={`h-full rounded-full transition-all duration-500 ${
-                                                    ticket.status === 'resolved' ? 'bg-emerald-500' :
-                                                    ticket.status === 'in progress' || ticket.status === 'in-progress' ? 'bg-amber-500' :
-                                                    'bg-slate-300'
-                                                }`}
-                                                style={{
-                                                    width: ticket.status === 'open' ? '0%' : 
-                                                           ticket.status === 'in progress' || ticket.status === 'in-progress' ? '50%' : 
-                                                           ticket.status === 'resolved' ? '100%' : '0%'
-                                                }}
-                                            ></div>
-                                        </div>
-                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                                            {ticket.status === 'open' ? 'Pending Assignment' : 
-                                             ticket.status === 'in progress' || ticket.status === 'in-progress' ? 'Work in Progress' : 
-                                             ticket.status === 'resolved' ? 'Completed' : 'Processing'}
-                                        </p>
-                                    </div>
+                                        );
+                                    })
+                                )}
+                                <div ref={messagesEndRef} />
+                            </div>
 
-                                    <div className="flex items-center gap-4 mb-4">
-                                        <div className="h-12 w-12 rounded-full overflow-hidden bg-primary/20 border-2 border-primary flex items-center justify-center shrink-0">
-                                            <span className="material-symbols-outlined text-primary">person</span>
-                                        </div>
-                                        <div>
-                                            <p className="font-bold">{ticket.employee.name}</p>
-                                            <p className="text-xs text-slate-500 dark:text-slate-400">Technician</p>
-                                        </div>
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <button className="p-2 border border-slate-200 dark:border-border-dark rounded-lg flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
-                                            <span className="material-symbols-outlined text-xl">call</span>
+                            {/* Message Input */}
+                            {ticket.id_employee ? (
+                                <div className="p-4 border-t border-slate-200 dark:border-border-dark bg-white dark:bg-surface-dark">
+                                    <div className="flex gap-2">
+                                        <textarea
+                                            value={messageText}
+                                            onChange={(e) => setMessageText(e.target.value)}
+                                            onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
+                                            placeholder="Type your message..."
+                                            rows="2"
+                                            className="flex-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-lg text-sm border-none focus:ring-2 focus:ring-primary resize-none text-slate-900 dark:text-white"
+                                        />
+                                        <button
+                                            onClick={handleSendMessage}
+                                            disabled={isSubmittingMessage || !messageText.trim()}
+                                            className="bg-primary hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-3 py-2 rounded-lg flex items-center justify-center transition-colors"
+                                        >
+                                            <span className="material-symbols-outlined text-lg">send</span>
                                         </button>
-                                        <button className="p-2 border border-slate-200 dark:border-border-dark rounded-lg flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
-                                            <span className="material-symbols-outlined text-xl">mail</span>
-                                        </button>
                                     </div>
-                                </>
+                                </div>
                             ) : (
-                                <div className="text-center py-6">
-                                    <span className="material-symbols-outlined text-4xl text-slate-300 dark:text-slate-600 block mb-2">person_off</span>
-                                    <p className="text-sm text-slate-500 dark:text-slate-400">No technician assigned yet</p>
+                                <div className="p-4 border-t border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-800 text-center">
+                                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                                        No technician assigned yet
+                                    </p>
                                 </div>
                             )}
-                        </div>
-
-                        {/* Attachments */}
-                        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-6 shadow-sm">
-                            <h4 className="font-bold mb-4 uppercase text-xs text-slate-400 tracking-widest">Description</h4>
-                            <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed mb-4">
-                                {ticket.description}
-                            </p>
-                            {ticket.image && (
-                                <div className="mt-4">
-                                    <p className="text-xs text-slate-500 mb-2">Attached Image</p>
-                                    <div className="h-40 bg-slate-100 dark:bg-slate-800 rounded border border-slate-200 dark:border-border-dark overflow-hidden">
-                                        <img alt="Ticket attachment" className="w-full h-full object-cover" src={`/storage/${ticket.image}`} />
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Support Shortcut */}
-                        <div className="bg-gradient-to-br from-primary to-orange-700 rounded-xl p-6 text-white shadow-xl shadow-primary/10">
-                            <span className="material-symbols-outlined text-3xl mb-2">support_agent</span>
-                            <h5 className="font-bold text-lg leading-tight">Need immediate assistance?</h5>
-                            <p className="text-xs text-white/80 mt-2 mb-4">Our live agents are available 24/7 for urgent escalations regarding your service.</p>
-                            <button className="w-full bg-white text-primary font-bold py-2 rounded-lg text-sm hover:bg-orange-50 transition-colors">Open Live Chat</button>
                         </div>
                     </div>
                 </div>
             </main>
+
+            {/* Chat Panel (Mobile) */}
+            {ticket && (
+                <div className="lg:hidden fixed inset-0 bg-black/50 z-40 flex items-end">
+                    <div className="w-full bg-white dark:bg-surface-dark border-t border-slate-200 dark:border-order-dark rounded-t-xl overflow-hidden flex flex-col h-96">
+                        {/* Chat Header */}
+                        <div className="p-4 border-b border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-800 flex items-center justify-between">
+                            <h4 className="font-bold text-sm flex items-center gap-2">
+                                <span className="material-symbols-outlined text-primary">chat</span>
+                                Chat with Technician
+                            </h4>
+                            <button onClick={() => setShowChat(false)} className="text-slate-400 hover:text-slate-600">
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        {/* Messages Container */}
+                        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50 dark:bg-slate-900/30">
+                            {loadingMessages ? (
+                                <div className="flex items-center justify-center h-full">
+                                    <span className="text-xs text-slate-400">Loading messages...</span>
+                                </div>
+                            ) : conversationMessages.length === 0 ? (
+                                <div className="flex items-center justify-center h-full text-center">
+                                    <p className="text-xs text-slate-400">No messages yet. Start the conversation!</p>
+                                </div>
+                            ) : (
+                                conversationMessages.map((msg, index) => {
+                                    const isFromTechnician = isMessageFromTechnician(msg);
+                                    return (
+                                        <div key={index} className={`flex ${isFromTechnician ? 'justify-start' : 'justify-end'}`}>
+                                            <div
+                                                className={`max-w-xs px-3 py-2 rounded-lg text-sm ${
+                                                    isFromTechnician
+                                                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white border border-slate-200 dark:border-slate-700'
+                                                        : 'bg-primary text-white'
+                                                }`}
+                                            >
+                                                <p className="break-words">{msg.message}</p>
+                                                <p className={`text-xs mt-1 ${isFromTechnician ? 'text-slate-500 dark:text-slate-400' : 'text-white/70'}`}>
+                                                    {msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    );
+                                })
+                            )}
+                            <div ref={messagesEndRef} />
+                        </div>
+
+                        {/* Message Input */}
+                        {ticket.id_employee ? (
+                            <div className="p-4 border-t border-slate-200 dark:border-border-dark bg-white dark:bg-surface-dark">
+                                <div className="flex gap-2">
+                                    <textarea
+                                        value={messageText}
+                                        onChange={(e) => setMessageText(e.target.value)}
+                                        onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
+                                        placeholder="Type your message..."
+                                        rows="2"
+                                        className="flex-1 px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-lg text-sm border-none focus:ring-2 focus:ring-primary resize-none text-slate-900 dark:text-white"
+                                    />
+                                    <button
+                                        onClick={handleSendMessage}
+                                        disabled={isSubmittingMessage || !messageText.trim()}
+                                        className="bg-primary hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-3 py-2 rounded-lg flex items-center justify-center transition-colors"
+                                    >
+                                        <span className="material-symbols-outlined text-lg">send</span>
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-4 border-t border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-800 text-center">
+                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                    No technician assigned yet
+                                </p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
 
             <footer className="mt-12 py-10 border-t border-slate-200 dark:border-border-dark bg-white dark:bg-surface-dark">
                 <div className="max-w-7xl mx-auto px-4 lg:px-10 flex flex-col md:flex-row justify-between items-center gap-4 text-sm text-slate-500 dark:text-slate-400">

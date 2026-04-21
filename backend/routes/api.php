@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\AdminUserController;
 use App\Http\Controllers\Api\MachineController;
 use App\Http\Controllers\Api\MessagingController;
 use App\Http\Controllers\Api\ClientProfileController;
+use App\Http\Controllers\Api\SupportBotController;
 
 /*
 |--------------------------------------------------------------------------
@@ -33,8 +34,10 @@ Route::middleware('auth:sanctum')->group(function () {
          ->only(['index', 'store', 'show', 'destroy']);
     Route::post('client/tickets/{ticket}/rate', [ClientController::class, 'rate']);
     Route::get('client/machines', [ClientController::class, 'getMachines']);
+    Route::get('client/profile', [ClientProfileController::class, 'getProfile']);
     Route::apiResource('client/machines', MachineController::class)
          ->only(['index', 'store', 'update', 'destroy']);
+    Route::middleware('role:client')->post('client/support-bot', [SupportBotController::class, 'ask']);
 
     // Employee
     Route::middleware('role:employee')->group(function () {
@@ -47,6 +50,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('employee/stats', [EmployeeController::class, 'stats']);
         Route::get('employee/leaderboard', [EmployeeController::class, 'leaderboard']);
     });
+
+    // IT queue (shared by employee/admin views)
+    Route::get('it/tickets', [EmployeeController::class, 'itTickets']);
 
     // Admin
     Route::middleware('role:admin')->group(function () {
@@ -75,14 +81,13 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // Messaging (available to employees, admins, and clients)
-    Route::middleware('role:employee|admin|client')->group(function () {
-        Route::get('messages/conversations', [MessagingController::class, 'conversations']);
-        Route::get('messages/conversations/{conversationId}', [MessagingController::class, 'getMessages']);
-        Route::post('messages/send', [MessagingController::class, 'sendMessage']);
-        Route::post('messages/start/{userId}', [MessagingController::class, 'startConversation']);
-        Route::get('messages/available-employees', [MessagingController::class, 'getAvailableEmployees']);
-        Route::get('messages/unread', [MessagingController::class, 'unreadSummary']);
-        Route::get('messages/search', [MessagingController::class, 'searchMessages']);
-        Route::delete('messages/{messageId}', [MessagingController::class, 'deleteMessage']);
-    });
+    Route::get('messages/conversations', [MessagingController::class, 'conversations']);
+    Route::get('messages/conversations/{conversationId}', [MessagingController::class, 'getMessages']);
+    Route::get('messages/tickets/{ticketId}', [MessagingController::class, 'getTicketMessages']);
+    Route::post('messages/send', [MessagingController::class, 'sendMessage']);
+    Route::post('messages/start/{userId}', [MessagingController::class, 'startConversation']);
+    Route::get('messages/available-employees', [MessagingController::class, 'getAvailableEmployees']);
+    Route::get('messages/unread', [MessagingController::class, 'unreadSummary']);
+    Route::get('messages/search', [MessagingController::class, 'searchMessages']);
+    Route::delete('messages/{messageId}', [MessagingController::class, 'deleteMessage']);
 });

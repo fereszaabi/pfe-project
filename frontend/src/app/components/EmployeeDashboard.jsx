@@ -1,116 +1,333 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Ticket, Users, Clock, CheckCircle, AlertTriangle, LogOut, User, Filter, Search, Send, Star } from 'lucide-react';
 import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmployeeTicket, sendMessage, startConversation, getEmployeeStats } from '../../services/api';
+import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmployeeTicket, sendMessage, startConversation, getEmployeeStats, getTicketMessages, getUnreadMessages } from '../../services/api';
 
 export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const [selectedTicket, setSelectedTicket] = useState(null);
     const [filterStatus, setFilterStatus] = useState('all');
     const [searchQuery, setSearchQuery] = useState('');
+    const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
     const [allTickets, setAllTickets] = useState([]);
     const [myTickets, setMyTickets] = useState([]);
     const [unassignedTickets, setUnassignedTickets] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [ticketsError, setTicketsError] = useState('');
     const [employeeStats, setEmployeeStats] = useState(null);
-    const [showMessageModal, setShowMessageModal] = useState(false);
     const [messageText, setMessageText] = useState('');
     const [isSubmittingMessage, setIsSubmittingMessage] = useState(false);
     const [showOnlyMyTickets, setShowOnlyMyTickets] = useState(false);
+    const [conversationMessages, setConversationMessages] = useState([]);
+    const [loadingMessages, setLoadingMessages] = useState(false);
+    const [conversationId, setConversationId] = useState(null);
+    const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
+    const [toast, setToast] = useState(null);
+    const [actionLoading, setActionLoading] = useState({});
+    const messagesEndRef = useRef(null);
 
-    const fetchTickets = () => {
-        setLoading(true);
-        Promise.all([getEmployeeTickets(), getEmployeeStats()])
-            .then(([data, stats]) => {
-                console.log('Employee tickets data:', data);
-                setAllTickets(data.all_tickets?.data ?? data.all_tickets ?? []);
-                setMyTickets(data.my_tickets?.data ?? data.my_tickets ?? []);
-                setUnassignedTickets(data.unassigned_tickets?.data ?? data.unassigned_tickets ?? []);
-                setEmployeeStats(stats);
-            })
-            .catch((err) => {
-                console.error('Failed to fetch employee tickets:', err);
-                setAllTickets([]);
-                setMyTickets([]);
-                setUnassignedTickets([]);
-            })
-            .finally(() => setLoading(false));
+    const isMessageFromCurrentEmployee = (msg) => {
+        return msg?.sender_type === 'employee' || msg?.sender?.email === user?.email;
     };
+
+    const showToast = (type, message) => {
+        setToast({ type, message, id: Date.now() });
+    };
+
+    const fetchTickets = async (options = {}) => {
+        const { silent = false } = options;
+        if (!silent) {
+            setLoading(true);
+        }
+        setTicketsError('');
+        try {
+            const [data, stats] = await Promise.all([getEmployeeTickets(), getEmployeeStats()]);
+            setAllTickets(data.all_tickets?.data ?? data.all_tickets ?? []);
+            setMyTickets(data.my_tickets?.data ?? data.my_tickets ?? []);
+            setUnassignedTickets(data.unassigned_tickets?.data ?? data.unassigned_tickets ?? []);
+            setEmployeeStats(stats);
+        } catch (err) {
+            console.error('Failed to fetch employee tickets:', err);
+            setAllTickets([]);
+            setMyTickets([]);
+            setUnassignedTickets([]);
+            setTicketsError('Failed to load tickets. Please retry.');
+        } finally {
+            if (!silent) {
+                setLoading(false);
+            }
+        }
+    };
+
+    const setActionPending = (key, isPending) => {
+        setActionLoading((prev) => ({ ...prev, [key]: isPending }));
+    };
+
+    useEffect(() => {
+        const timeoutId = setTimeout(() => {
+            setDebouncedSearchQuery(searchQuery.trim().toLowerCase());
+        }, 300);
+
+        return () => clearTimeout(timeoutId);
+    }, [searchQuery]);
+
+    useEffect(() => {
+        if (!toast) return;
+
+        const timeoutId = setTimeout(() => {
+            setToast(null);
+        }, 3500);
+
+        return () => clearTimeout(timeoutId);
+    }, [toast]);
 
     useEffect(() => { fetchTickets(); }, []);
 
+    useEffect(() => {
+        let isMounted = true;
+
+        const fetchUnread = async () => {
+            try {
+                const data = await getUnreadMessages();
+                if (isMounted) {
+                    setUnreadMessagesCount(Number(data?.total_unread ?? 0));
+                }
+            } catch (_) {}
+        };
+
+        fetchUnread();
+        const intervalId = setInterval(fetchUnread, 2000);
+
+        return () => {
+            isMounted = false;
+            clearInterval(intervalId);
+        };
+    }, []);
+
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    };
+
+    useEffect(() => {
+        scrollToBottom();
+    }, [conversationMessages]);
+
+    const fetchConversationMessages = async (ticket, options = {}) => {
+        if (!ticket?.id) return;
+        const { silent = false } = options;
+        
+        if (!silent) {
+            setLoadingMessages(true);
+        }
+        try {
+            // Fetch messages for this specific ticket
+            const messagesResponse = await getTicketMessages(ticket.id);
+            const msgs = messagesResponse?.data?.messages || messagesResponse?.messages || [];
+            setConversationMessages(Array.isArray(msgs) ? msgs : []);
+        } catch (error) {
+            console.error('Failed to fetch ticket messages:', error);
+            if (!silent) {
+                setConversationMessages([]);
+            }
+        } finally {
+            if (!silent) {
+                setLoadingMessages(false);
+            }
+        }
+    };
+
+    useEffect(() => {
+        if (!selectedTicket?.id) return;
+
+        fetchConversationMessages(selectedTicket);
+        const intervalId = setInterval(() => {
+            fetchConversationMessages(selectedTicket, { silent: true });
+        }, 2000);
+
+        return () => clearInterval(intervalId);
+    }, [selectedTicket?.id]);
+
+    const handleBellClick = async () => {
+        try {
+            const unreadData = await getUnreadMessages();
+            const unreadCount = Number(unreadData?.total_unread ?? 0);
+            setUnreadMessagesCount(unreadCount);
+
+            const bestTicket =
+                myTickets.find((ticket) => ticket?.client?.id || ticket?.id_client) ||
+                allTickets.find((ticket) => ticket?.id_employee && (ticket?.client?.id || ticket?.id_client));
+
+            if (!bestTicket) {
+                showToast('warning', 'No ticket chat available yet. Claim a ticket first.');
+                return;
+            }
+
+            setSelectedTicket(bestTicket);
+
+            // Open chat quickly even before the polling effect runs.
+            await fetchConversationMessages(bestTicket);
+
+            if (unreadCount === 0) {
+                console.info('No unread messages. Opened your latest ticket chat.');
+            }
+        } catch (error) {
+            console.error('Failed to open notifications:', error);
+            showToast('error', 'Unable to load notifications right now.');
+        }
+    };
+
     const handleAssignTicket = async (ticketId) => {
+        const actionKey = `assign-${ticketId}`;
+        setActionPending(actionKey, true);
         try {
             await assignTicket(ticketId);
-            fetchTickets();
-        } catch (_) {}
+            await fetchTickets({ silent: true });
+            showToast('success', 'Ticket assigned successfully.');
+        } catch (_) {
+            showToast('error', 'Failed to assign ticket.');
+        } finally {
+            setActionPending(actionKey, false);
+        }
     };
 
     const handleClaimTicket = async (ticketId) => {
+        const actionKey = `claim-${ticketId}`;
+        setActionPending(actionKey, true);
         try {
-            await claimTicket(ticketId);
-            fetchTickets();
-            setSelectedTicket(null);
-        } catch (_) {}
+            const response = await claimTicket(ticketId);
+            const ticketData = response?.data || response;
+            if (ticketData && ticketData.id) {
+                setSelectedTicket(ticketData);
+                await fetchTickets({ silent: true });
+                showToast('success', 'Ticket claimed. You can start working now.');
+            } else {
+                throw new Error('Invalid response format');
+            }
+        } catch (error) {
+            console.error('Failed to claim ticket:', error);
+            showToast('error', 'Failed to claim ticket.');
+        } finally {
+            setActionPending(actionKey, false);
+        }
     };
 
     const handleUnclaimTicket = async (ticketId) => {
+        const actionKey = `unclaim-${ticketId}`;
+        setActionPending(actionKey, true);
         try {
             await unclaimTicket(ticketId);
-            fetchTickets();
+            await fetchTickets({ silent: true });
             setSelectedTicket(null);
-        } catch (_) {}
+            showToast('success', 'Ticket released back to queue.');
+        } catch (_) {
+            showToast('error', 'Failed to release ticket.');
+        } finally {
+            setActionPending(actionKey, false);
+        }
     };
 
     const handleContactClient = async (ticket) => {
         try {
             if (ticket.client?.id) {
                 await startConversation(ticket.client.id);
+                await fetchConversationMessages(ticket);
             }
-            setShowMessageModal(true);
         } catch (_) {}
     };
 
     const handleSendMessage = async () => {
-        if (!messageText.trim() || !selectedTicket?.client?.id) return;
-        
+        if (!messageText.trim()) {
+            showToast('warning', 'Write a message before sending.');
+            return;
+        }
+
+        if (!selectedTicket?.id) {
+            showToast('error', 'No ticket selected.');
+            return;
+        }
+
+        const recipientId = selectedTicket?.id_client ?? selectedTicket?.client?.id;
+        if (!recipientId) {
+            showToast('error', 'This ticket has no linked client.');
+            return;
+        }
+
+        const pendingText = messageText.trim();
+        const tempId = `temp-${Date.now()}`;
+        const optimisticMessage = {
+            id: tempId,
+            message: pendingText,
+            created_at: new Date().toISOString(),
+            sender_type: 'employee',
+            sender: { email: user?.email },
+        };
+
         setIsSubmittingMessage(true);
+        setConversationMessages((prev) => [...prev, optimisticMessage]);
+        setMessageText('');
+
         try {
-            await sendMessage({
-                recipient_id: selectedTicket.client.id,
-                message: messageText,
+            const payload = {
+                recipient_id: recipientId,
+                recipient_type: 'client',
+                message: pendingText,
                 ticket_id: selectedTicket.id,
-            });
-            setMessageText('');
-            setShowMessageModal(false);
-            // Show success message
-        } catch (_) {
-            // Show error
+            };
+
+            await sendMessage(payload);
+            await fetchConversationMessages(selectedTicket, { silent: true });
+        } catch (error) {
+            console.error('Failed to send message - Full error:', error);
+            setConversationMessages((prev) => prev.filter((msg) => msg.id !== tempId));
+            setMessageText(pendingText);
+            const apiMessage = error?.message || error?.error || 'Message failed to send. Please retry.';
+            showToast('error', apiMessage);
         } finally {
             setIsSubmittingMessage(false);
         }
     };
 
     const handleStartWork = async (ticketId) => {
+        const actionKey = `start-${ticketId}`;
+        setActionPending(actionKey, true);
         try {
             await updateEmployeeTicket(ticketId, { status: 'in progress' });
-            fetchTickets();
-        } catch (_) {}
+            await fetchTickets({ silent: true });
+            showToast('success', 'Ticket moved to in progress.');
+        } catch (_) {
+            showToast('error', 'Failed to update ticket status.');
+        } finally {
+            setActionPending(actionKey, false);
+        }
     };
 
     const handleResolve = async (ticketId) => {
+        const actionKey = `resolve-${ticketId}`;
+        setActionPending(actionKey, true);
         try {
             await updateEmployeeTicket(ticketId, { status: 'resolved' });
             setSelectedTicket(null);
-            fetchTickets();
-        } catch (_) {}
+            await fetchTickets({ silent: true });
+            showToast('success', 'Ticket marked as resolved.');
+        } catch (_) {
+            showToast('error', 'Failed to resolve ticket.');
+        } finally {
+            setActionPending(actionKey, false);
+        }
     };
 
     const handleEscalate = async (ticketId) => {
+        const actionKey = `escalate-${ticketId}`;
+        setActionPending(actionKey, true);
         try {
-            await updateEmployeeTicket(ticketId, { status: 'tech' });
+            await updateEmployeeTicket(ticketId, { status: 'escalated' });
             setSelectedTicket(null);
-            fetchTickets();
-        } catch (_) {}
+            await fetchTickets({ silent: true });
+            showToast('success', 'Ticket escalated to IT.');
+        } catch (_) {
+            showToast('error', 'Failed to escalate ticket.');
+        } finally {
+            setActionPending(actionKey, false);
+        }
     };
 
     const getStatusColor = (status) => {
@@ -151,9 +368,10 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     
     const filteredTickets = displayedTickets
         .filter(t => filterStatus === 'all' || t.status === filterStatus)
-        .filter(t => searchQuery === '' ||
-            t.titre?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            t.description?.toLowerCase().includes(searchQuery.toLowerCase())
+        .filter(t => debouncedSearchQuery === '' ||
+            t.titre?.toLowerCase().includes(debouncedSearchQuery) ||
+            t.description?.toLowerCase().includes(debouncedSearchQuery) ||
+            t.client?.nom?.toLowerCase().includes(debouncedSearchQuery)
         )
         .sort((a, b) => (priorityOrder[a.priority] ?? 4) - (priorityOrder[b.priority] ?? 4));
 
@@ -163,6 +381,57 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         inProgress: displayedTickets.filter(t => t.status === 'in progress' || t.status === 'in-progress').length,
         resolved: displayedTickets.filter(t => t.status === 'resolved').length
     };
+
+    const getAverageFirstResponseHours = () => {
+        const respondedTickets = allTickets.filter(
+            (ticket) => ticket?.created_at && ticket?.assigned_at
+        );
+
+        if (respondedTickets.length === 0) {
+            return null;
+        }
+
+        const totalHours = respondedTickets.reduce((sum, ticket) => {
+            const createdAt = new Date(ticket.created_at).getTime();
+            const assignedAt = new Date(ticket.assigned_at).getTime();
+
+            if (!Number.isFinite(createdAt) || !Number.isFinite(assignedAt) || assignedAt < createdAt) {
+                return sum;
+            }
+
+            return sum + (assignedAt - createdAt) / (1000 * 60 * 60);
+        }, 0);
+
+        return totalHours / respondedTickets.length;
+    };
+
+    const formatDurationFromHours = (hours) => {
+        if (hours === null || Number.isNaN(hours)) {
+            return '--';
+        }
+
+        if (hours < 1) {
+            return `${Math.max(1, Math.round(hours * 60))}m`;
+        }
+
+        return `${hours.toFixed(1)}h`;
+    };
+
+    const formatSubmissionTime = (createdAt) => {
+        if (!createdAt) return 'Unknown time';
+
+        const dt = new Date(createdAt);
+        if (!Number.isFinite(dt.getTime())) return 'Unknown time';
+
+        return dt.toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+        });
+    };
+
+    const avgFirstResponseHours = getAverageFirstResponseHours();
 
     // performance chart data by grouping resolved tickets by week
     const getPerformanceChartData = () => {
@@ -234,34 +503,21 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                         </button>
                         <button
                             onClick={() => onNavigate?.('escalated')}
-                            className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:bg-surface-dark/50 hover:text-white transition-colors group"
+                            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
+                                activeView === 'escalated' ? 'bg-surface-dark text-white' : 'text-slate-400 hover:bg-surface-dark/50 hover:text-white'
+                            }`}
                         >
-                            <span className="material-symbols-outlined">priority_high</span>
+                            <span className={`material-symbols-outlined ${activeView === 'escalated' ? 'text-primary' : ''}`}>priority_high</span>
                             <span className="font-medium text-sm">Escalated</span>
-                        </button>
-                        <button
-                            onClick={() => onNavigate?.('history')}
-                            className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:bg-surface-dark/50 hover:text-white transition-colors group"
-                        >
-                            <span className="material-symbols-outlined">history</span>
-                            <span className="font-medium text-sm">History</span>
+                            <span className={`ml-auto text-[10px] px-2 py-0.5 rounded-full ${
+                                activeView === 'escalated' ? 'bg-primary text-white' : 'bg-surface-dark text-slate-400'
+                            }`}>
+                                {allTickets.filter(t => t.status === 'escalated' || t.status === 'tech').length}
+                            </span>
                         </button>
                     </nav>
 
-                    <div className="mt-10 pt-6 border-t border-slate-800">
-                        <p className="text-slate-500 text-[10px] font-bold uppercase tracking-[0.1em] px-4 mb-4">Teams</p>
-                        <div className="space-y-1">
-                            <a className="flex items-center gap-3 px-4 py-2 rounded-lg text-slate-400 hover:text-white text-sm" href="#">
-                                <span className="size-2 rounded-full bg-green-500"></span> ERP Solutions
-                            </a>
-                            <a className="flex items-center gap-3 px-4 py-2 rounded-lg text-slate-400 hover:text-white text-sm" href="#">
-                                <span className="size-2 rounded-full bg-blue-500"></span> CRM Technical
-                            </a>
-                            <a className="flex items-center gap-3 px-4 py-2 rounded-lg text-slate-400 hover:text-white text-sm" href="#">
-                                <span className="size-2 rounded-full bg-primary"></span> IT On-site
-                            </a>
-                        </div>
-                    </div>
+
                 </div>
 
         
@@ -284,9 +540,17 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                         </div>
                     </div>
                     <div className="flex items-center gap-4">
-                        <button className="size-10 flex items-center justify-center rounded-lg bg-slate-100 dark:bg-[#3a2f27] text-slate-600 dark:text-[#bba99b] hover:text-primary transition-colors relative">
+                        <button
+                            onClick={handleBellClick}
+                            className="size-10 flex items-center justify-center rounded-lg bg-slate-100 dark:bg-[#3a2f27] text-slate-600 dark:text-[#bba99b] hover:text-primary transition-colors relative"
+                            title="Open notifications and ticket chat"
+                        >
                             <span className="material-symbols-outlined">notifications</span>
-                            <span className="absolute top-2 right-2 size-2 bg-primary rounded-full border-2 border-white dark:border-[#181411]"></span>
+                            {unreadMessagesCount > 0 && (
+                                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 bg-primary text-white rounded-full border-2 border-white dark:border-[#181411] text-[10px] font-bold leading-[14px] flex items-center justify-center">
+                                    {unreadMessagesCount > 99 ? '99+' : unreadMessagesCount}
+                                </span>
+                            )}
                         </button>
                         <div className="h-8 w-px bg-slate-200 dark:bg-[#3a2f27]"></div>
                         <div className="flex items-center gap-3 pl-2">
@@ -311,7 +575,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                 <div className="flex-1 overflow-y-auto p-8">
                     <div className="max-w-7xl mx-auto space-y-8">
                         {/* Stats Grid */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                             <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm flex flex-col">
                                 <div className="flex items-center justify-between mb-4">
                                     <span className="text-slate-500 dark:text-[#bba99b] text-sm font-medium">Total Active</span>
@@ -356,6 +620,20 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                     <span className="text-slate-400 text-xs font-bold mb-1">Stable</span>
                                 </div>
                                 <p className="text-[10px] text-[#bba99b] mt-2 uppercase tracking-wide">Pending information</p>
+                            </div>
+
+                            <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm flex flex-col">
+                                <div className="flex items-center justify-between mb-4">
+                                    <span className="text-slate-500 dark:text-[#bba99b] text-sm font-medium">Avg First Response</span>
+                                    <div className="size-8 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-500">
+                                        <span className="material-symbols-outlined text-lg">timer</span>
+                                    </div>
+                                </div>
+                                <div className="flex items-end gap-3">
+                                    <h3 className="text-3xl font-bold text-slate-900 dark:text-white">{formatDurationFromHours(avgFirstResponseHours)}</h3>
+                                    <span className="text-slate-400 text-xs font-bold mb-1">Created → Claimed</span>
+                                </div>
+                                <p className="text-[10px] text-[#bba99b] mt-2 uppercase tracking-wide">Based on assigned tickets</p>
                             </div>
                         </div>
 
@@ -411,7 +689,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                     <h3 className="font-bold text-lg text-slate-900 dark:text-white mb-6">Performance Metrics</h3>
                                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                                         <div className="bg-slate-50 dark:bg-[#3a2f27]/30 p-4 rounded-lg">
-                                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-[#bba99b] mb-1">Avg Response Time</p>
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-[#bba99b] mb-1">Avg Resolution Time</p>
                                             <p className="text-2xl font-bold text-slate-900 dark:text-white">{(employeeStats.avg_resolution_hours ?? 0).toFixed(1)}h</p>
                                         </div>
                                         <div className="bg-slate-50 dark:bg-[#3a2f27]/30 p-4 rounded-lg">
@@ -476,8 +754,26 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                     <select className="bg-slate-100 dark:bg-[#181411] border-none rounded-lg text-xs font-bold px-3 py-2 pr-8 focus:ring-0 text-slate-900 dark:text-[#bba99b]">
                                         <option>Software Type</option>
                                     </select>
+                                    <button
+                                        onClick={() => fetchTickets()}
+                                        className="px-3 py-2 text-xs font-semibold rounded-lg bg-slate-100 dark:bg-[#181411] hover:bg-slate-200 dark:hover:bg-[#3a2f27] text-slate-700 dark:text-[#bba99b] transition-colors"
+                                    >
+                                        Refresh
+                                    </button>
                                 </div>
                             </div>
+
+                            {ticketsError && (
+                                <div className="mx-6 mt-4 rounded-lg border border-rose-300/40 bg-rose-50 dark:bg-rose-900/20 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+                                    <p className="text-sm font-medium text-rose-700 dark:text-rose-300">{ticketsError}</p>
+                                    <button
+                                        onClick={() => fetchTickets()}
+                                        className="px-3 py-1.5 text-xs font-semibold rounded-md bg-rose-600 hover:bg-rose-700 text-white transition-colors"
+                                    >
+                                        Retry
+                                    </button>
+                                </div>
+                            )}
 
                             <div className="overflow-x-auto">
                                 <table className="w-full text-left border-collapse">
@@ -491,7 +787,54 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100 dark:divide-[#3a2f27] text-sm">
-                                        {filteredTickets.map((ticket, idx) => (
+                                        {loading ? (
+                                            [...Array(6)].map((_, idx) => (
+                                                <tr key={`skeleton-${idx}`} className="animate-pulse">
+                                                    <td className="px-6 py-5">
+                                                        <div className="h-4 w-36 rounded bg-slate-200 dark:bg-[#3a2f27]"></div>
+                                                    </td>
+                                                    <td className="px-6 py-5">
+                                                        <div className="h-4 w-16 rounded bg-slate-200 dark:bg-[#3a2f27]"></div>
+                                                    </td>
+                                                    <td className="px-6 py-5">
+                                                        <div className="h-4 w-52 rounded bg-slate-200 dark:bg-[#3a2f27] mb-2"></div>
+                                                        <div className="h-3 w-40 rounded bg-slate-200 dark:bg-[#3a2f27]"></div>
+                                                    </td>
+                                                    <td className="px-6 py-5">
+                                                        <div className="h-4 w-20 rounded bg-slate-200 dark:bg-[#3a2f27]"></div>
+                                                    </td>
+                                                    <td className="px-6 py-5">
+                                                        <div className="h-8 w-8 rounded bg-slate-200 dark:bg-[#3a2f27]"></div>
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        ) : filteredTickets.length === 0 ? (
+                                            <tr>
+                                                <td colSpan={5} className="px-6 py-14 text-center">
+                                                    <span className="material-symbols-outlined text-4xl text-slate-300 dark:text-slate-600 block mb-3">inbox</span>
+                                                    <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">No tickets match your current filters.</p>
+                                                    <p className="text-xs text-slate-500 dark:text-[#bba99b] mt-1">Try changing status/search filters or refresh the queue.</p>
+                                                    <div className="mt-4 flex items-center justify-center gap-2">
+                                                        <button
+                                                            onClick={() => {
+                                                                setFilterStatus('all');
+                                                                setSearchQuery('');
+                                                                setShowOnlyMyTickets(false);
+                                                            }}
+                                                            className="px-3 py-2 text-xs font-semibold rounded-lg bg-slate-100 dark:bg-[#181411] hover:bg-slate-200 dark:hover:bg-[#3a2f27] text-slate-700 dark:text-[#bba99b] transition-colors"
+                                                        >
+                                                            Clear Filters
+                                                        </button>
+                                                        <button
+                                                            onClick={() => fetchTickets()}
+                                                            className="px-3 py-2 text-xs font-semibold rounded-lg bg-primary hover:bg-orange-600 text-white transition-colors"
+                                                        >
+                                                            Refresh Tickets
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ) : filteredTickets.map((ticket, idx) => (
                                             <tr key={ticket.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors cursor-pointer group" onClick={() => setSelectedTicket(ticket)}>
                                                 <td className={`px-6 py-5 ${idx === 0 ? 'border-l-4 border-primary' : ''}`}>
                                                     <div className="flex items-center gap-3">
@@ -510,7 +853,12 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                                     </span>
                                                 </td>
                                                 <td className="px-6 py-5">
-                                                    <p className="font-semibold text-slate-900 dark:text-white mb-0.5 line-clamp-1">{ticket.titre || `Ticket #${ticket.id}`}</p>
+                                                    <div className="flex items-center justify-between gap-3 mb-0.5">
+                                                        <p className="font-semibold text-slate-900 dark:text-white line-clamp-1">{ticket.titre || `Ticket #${ticket.id}`}</p>
+                                                        <span className="shrink-0 text-[10px] font-bold text-[#bba99b] uppercase tracking-wide">
+                                                            {formatSubmissionTime(ticket.created_at)}
+                                                        </span>
+                                                    </div>
                                                     <p className="text-xs text-[#bba99b] line-clamp-1">{ticket.description}</p>
                                                 </td>
                                                 <td className="px-6 py-5">
@@ -529,14 +877,9 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                                 <td className="px-6 py-5">
                                                     <div className="flex items-center gap-2">
                                                         <button
-                                                            onClick={(e) => { e.stopPropagation(); handleStartWork(ticket.id); }}
-                                                            className="bg-primary hover:bg-primary/90 text-white px-3 py-1.5 rounded font-bold text-xs transition-all shadow-sm"
-                                                        >
-                                                            Process
-                                                        </button>
-                                                        <button
                                                             onClick={(e) => { e.stopPropagation(); handleEscalate(ticket.id); }}
-                                                            className="text-slate-400 hover:text-rose-500 p-1.5 rounded transition-colors"
+                                                            disabled={Boolean(actionLoading[`escalate-${ticket.id}`])}
+                                                            className="text-slate-400 hover:text-rose-500 p-1.5 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                                         >
                                                             <span className="material-symbols-outlined text-lg">warning</span>
                                                         </button>
@@ -554,189 +897,273 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                 {/* Footer */}
                 <footer className="h-14 bg-white dark:bg-[#181411] border-t border-slate-200 dark:border-[#3a2f27] px-8 flex items-center justify-between shrink-0">
                     <div className="flex items-center gap-6">
-                        <div className="flex items-center gap-2">
-                            <span className="size-2 rounded-full bg-green-500 animate-pulse"></span>
-                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">System Status: Optimal</span>
-                        </div>
-                        <div className="h-4 w-px bg-slate-200 dark:bg-[#3a2f27]"></div>
-                        <div className="flex items-center gap-2">
-                            <div className="flex -space-x-1.5">
-                                <div className="size-5 rounded-full bg-slate-300 dark:bg-[#3a2f27] border border-white dark:border-[#181411] flex items-center justify-center text-[8px] font-bold">M</div>
-                                <div className="size-5 rounded-full bg-primary border border-white dark:border-[#181411] flex items-center justify-center text-[8px] text-white font-bold">AM</div>
-                                <div className="size-5 rounded-full bg-blue-500 border border-white dark:border-[#181411] flex items-center justify-center text-[8px] text-white font-bold">+2</div>
-                            </div>
-                            <span className="text-[10px] font-bold text-[#bba99b]">5 AGENTS ONLINE</span>
-                        </div>
+
                     </div>
                     <p className="text-[10px] text-slate-400 font-medium tracking-tight">© 2026 IDSoft Infrastructure Solutions • v4.2.0-stable</p>
                 </footer>
             </main>
 
-            {/* Ticket Detail Modal (Restored logic) */}
-            {selectedTicket && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setSelectedTicket(null)}>
-                    <div className="bg-white dark:bg-[#1e1a16] border border-slate-200 dark:border-[#3a2f27] rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
-                        <div className="p-6 border-b border-slate-200 dark:border-[#3a2f27] flex items-center justify-between sticky top-0 bg-white dark:bg-[#1e1a16] z-10">
-                            <div>
-                                <h3 className="text-xl font-bold text-slate-900 dark:text-white">Ticket #{String(selectedTicket.id).slice(0, 8)}</h3>
-                                <p className="text-sm text-[#bba99b] mt-0.5">{selectedTicket.client?.nom || selectedTicket.client?.name || `Client #${selectedTicket.id_client}`}</p>
-                            </div>
-                            <button onClick={() => setSelectedTicket(null)} className="p-2 hover:bg-slate-100 dark:hover:bg-[#3a2f27] rounded-lg transition-colors text-[#bba99b]">
-                                <span className="material-symbols-outlined">close</span>
-                            </button>
-                        </div>
-
-                        <div className="p-8 space-y-8">
-                            <div className="grid grid-cols-2 gap-8">
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Issue Title</label>
-                                    <p className="text-lg font-bold text-slate-900 dark:text-white">{selectedTicket.titre || `Ticket #${selectedTicket.id}`}</p>
-                                </div>
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Status</label>
-                                    <span className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase ${
-                                        selectedTicket.status === 'resolved' ? 'bg-green-500/10 text-green-500' :
-                                        selectedTicket.status === 'in-progress' || selectedTicket.status === 'in progress' ? 'bg-blue-500/10 text-blue-500' :
-                                        selectedTicket.status === 'assigned' ? 'bg-purple-500/10 text-purple-500' :
-                                        'bg-primary/10 text-primary'
-                                    }`}>{selectedTicket.status}</span>
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Priority</label>
-                                    <span className="px-2 py-1 bg-primary/10 text-primary text-[10px] font-bold rounded uppercase inline-block">{selectedTicket.priority}</span>
-                                </div>
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Assigned To</label>
-                                    <p className="text-sm font-semibold text-slate-900 dark:text-white">{selectedTicket.employee?.name || selectedTicket.id_employee ? `Employee #${selectedTicket.id_employee}` : 'Unassigned'}</p>
-                                </div>
-                            </div>
-
-                            <div>
-                                <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Full Description</label>
-                                <div className="bg-slate-50 dark:bg-[#181411] p-4 rounded-lg border border-slate-100 dark:border-[#3a2f27]">
-                                    <p className="text-sm text-slate-600 dark:text-[#bba99b] leading-relaxed italic">"{selectedTicket.description}"</p>
-                                </div>
-                            </div>
-
-                            {selectedTicket.image && (
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Attached Image</label>
-                                    <img src={selectedTicket.image} alt="Ticket attachment" className="rounded-lg max-h-48 w-full object-cover" />
-                                </div>
-                            )}
-
-                            {selectedTicket.employee_note && (
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Employee Notes</label>
-                                    <div className="bg-slate-50 dark:bg-[#181411] p-4 rounded-lg border border-slate-100 dark:border-[#3a2f27]">
-                                        <p className="text-sm text-slate-600 dark:text-[#bba99b]">{selectedTicket.employee_note}</p>
-                                    </div>
-                                </div>
-                            )}
-
-                            {selectedTicket.client_rating && (
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Client Rating</label>
-                                    <div className="flex items-center gap-2">
-                                        {[...Array(5)].map((_, i) => (
-                                            <Star
-                                                key={i}
-                                                size={20}
-                                                className={i < selectedTicket.client_rating ? 'fill-yellow-400 text-yellow-400' : 'text-slate-300'}
-                                            />
-                                        ))}
-                                        <span className="ml-2 text-sm font-semibold text-slate-900 dark:text-white">{selectedTicket.client_rating}/5</span>
-                                    </div>
-                                </div>
-                            )}
-
-                            {selectedTicket.status !== 'resolved' && (
-                                <div className="pt-6 border-t border-slate-100 dark:border-[#3a2f27] space-y-6">
-                                    <div className="flex flex-col gap-3">
-                                        {!selectedTicket.id_employee ? (
-                                            <button
-                                                onClick={() => handleClaimTicket(selectedTicket.id)}
-                                                className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-amber-600/20"
-                                            >
-                                                <span className="material-symbols-outlined text-lg">check_circle</span>
-                                                Claim Ticket
-                                            </button>
-                                        ) : (
-                                            <div className="flex gap-3">
-                                                <button
-                                                    onClick={() => handleResolve(selectedTicket.id)}
-                                                    className="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-green-600/20"
-                                                >
-                                                    <span className="material-symbols-outlined text-lg">check_circle</span>
-                                                    Resolve Ticket
-                                                </button>
-                                                <button
-                                                    onClick={() => handleEscalate(selectedTicket.id)}
-                                                    className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-600/20"
-                                                >
-                                                    <span className="material-symbols-outlined text-lg">warning</span>
-                                                    Escalate to IT
-                                                </button>
-                                                <button
-                                                    onClick={() => handleContactClient(selectedTicket)}
-                                                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20"
-                                                >
-                                                    <span className="material-symbols-outlined text-lg">message</span>
-                                                    Contact Client
-                                                </button>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
+            {toast && (
+                <div className="fixed top-5 right-5 z-[60]">
+                    <div className={`min-w-[260px] max-w-sm rounded-xl px-4 py-3 shadow-xl border ${
+                        toast.type === 'success'
+                            ? 'bg-emerald-50 border-emerald-300/60 text-emerald-800'
+                            : toast.type === 'warning'
+                                ? 'bg-amber-50 border-amber-300/60 text-amber-800'
+                                : 'bg-rose-50 border-rose-300/60 text-rose-800'
+                    }`}>
+                        <p className="text-sm font-semibold">{toast.message}</p>
                     </div>
                 </div>
             )}
 
-            {/* Message Modal */}
-            {showMessageModal && selectedTicket && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowMessageModal(false)}>
-                    <div className="bg-white dark:bg-[#1e1a16] border border-slate-200 dark:border-[#3a2f27] rounded-xl max-w-lg w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
-                        <div className="p-6 border-b border-slate-200 dark:border-[#3a2f27] flex items-center justify-between">
-                            <div>
-                                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Contact Client</h3>
-                                <p className="text-sm text-[#bba99b]">{selectedTicket.client?.nom || selectedTicket.client?.name || 'Client'}</p>
+            {/* Ticket Detail Modal with Chat (Restored logic) */}
+            {selectedTicket && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => { setSelectedTicket(null); setConversationMessages([]); }}>
+                    <div className="bg-white dark:bg-[#1e1a16] border border-slate-200 dark:border-[#3a2f27] rounded-xl max-w-6xl w-full max-h-[90vh] overflow-hidden shadow-2xl flex" onClick={(e) => e.stopPropagation()}>
+                        
+                        {/* Left side - Ticket Details */}
+                        <div className="flex-1 overflow-y-auto border-r border-slate-200 dark:border-[#3a2f27]">
+                            <div className="p-6 border-b border-slate-200 dark:border-[#3a2f27] flex items-center justify-between sticky top-0 bg-white dark:bg-[#1e1a16] z-10">
+                                <div>
+                                    <h3 className="text-xl font-bold text-slate-900 dark:text-white">Ticket #{String(selectedTicket.id).slice(0, 8)}</h3>
+                                    <p className="text-sm text-[#bba99b] mt-0.5">{selectedTicket.client?.nom || selectedTicket.client?.name || `Client #${selectedTicket.id_client}`}</p>
+                                </div>
+                                <button onClick={() => { setSelectedTicket(null); setConversationMessages([]); }} className="p-2 hover:bg-slate-100 dark:hover:bg-[#3a2f27] rounded-lg transition-colors text-[#bba99b]">
+                                    <span className="material-symbols-outlined">close</span>
+                                </button>
                             </div>
-                            <button onClick={() => setShowMessageModal(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-[#3a2f27] rounded-lg transition-colors">
-                                <span className="material-symbols-outlined">close</span>
-                            </button>
+
+                            <div className="p-8 space-y-8">
+                                {/* Client Contact Information Card - Prominent */}
+                                <div className="bg-gradient-to-br from-primary/5 to-orange-500/5 border-2 border-primary/30 rounded-xl p-6">
+                                    <h4 className="text-sm font-bold text-primary mb-4 uppercase tracking-wider flex items-center gap-2">
+                                        <span className="material-symbols-outlined text-lg">person</span>
+                                        Client Information
+                                    </h4>
+                                    <div className="space-y-4">
+                                        <div>
+                                            <p className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider mb-1">Name</p>
+                                            <p className="text-lg font-bold text-slate-900 dark:text-white">{selectedTicket.client?.nom || selectedTicket.client?.name || 'N/A'}</p>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <p className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider mb-1 flex items-center gap-1">
+                                                    <span className="material-symbols-outlined text-sm">phone</span> Phone
+                                                </p>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                                                    {selectedTicket.client?.numero || 'N/A'}
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <p className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider mb-1 flex items-center gap-1">
+                                                    <span className="material-symbols-outlined text-sm">mail</span> Email
+                                                </p>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white break-all">{selectedTicket.client?.mail || 'N/A'}</p>
+                                            </div>
+                                            <div className="col-span-2">
+                                                <p className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider mb-1 flex items-center gap-1">
+                                                    <span className="material-symbols-outlined text-sm">computer</span> AnyDesk Number
+                                                </p>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white font-mono">
+                                                    {selectedTicket.machine?.code_anydesk || 'N/A'}
+                                                </p>
+                                                <p className="text-xs text-slate-500 dark:text-[#bba99b] mt-1">
+                                                    Machine: {selectedTicket.machine?.nom_poste || 'N/A'}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Ticket Details */}
+                                <div className="grid grid-cols-2 gap-8">
+                                    <div>
+                                        <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Issue Title</label>
+                                        <p className="text-lg font-bold text-slate-900 dark:text-white">{selectedTicket.titre || `Ticket #${selectedTicket.id}`}</p>
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Status</label>
+                                        <span className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase ${
+                                            selectedTicket.status === 'resolved' ? 'bg-green-500/10 text-green-500' :
+                                            selectedTicket.status === 'in-progress' || selectedTicket.status === 'in progress' ? 'bg-blue-500/10 text-blue-500' :
+                                            selectedTicket.status === 'assigned' ? 'bg-purple-500/10 text-purple-500' :
+                                            'bg-primary/10 text-primary'
+                                        }`}>{selectedTicket.status}</span>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Priority</label>
+                                        <span className="px-2 py-1 bg-primary/10 text-primary text-[10px] font-bold rounded uppercase inline-block">{selectedTicket.priority}</span>
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Assigned To</label>
+                                        <p className="text-sm font-semibold text-slate-900 dark:text-white">{selectedTicket.employee?.name || selectedTicket.id_employee ? `Employee #${selectedTicket.id_employee}` : 'Unassigned'}</p>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Full Description</label>
+                                    <div className="bg-slate-50 dark:bg-[#181411] p-4 rounded-lg border border-slate-100 dark:border-[#3a2f27]">
+                                        <p className="text-sm text-slate-600 dark:text-[#bba99b] leading-relaxed italic">"{selectedTicket.description}"</p>
+                                    </div>
+                                </div>
+
+                                {selectedTicket.image && (
+                                    <div>
+                                        <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Attached Image</label>
+                                        <img src={selectedTicket.image} alt="Ticket attachment" className="rounded-lg max-h-48 w-full object-cover" />
+                                    </div>
+                                )}
+
+                                {selectedTicket.employee_note && (
+                                    <div>
+                                        <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Employee Notes</label>
+                                        <div className="bg-slate-50 dark:bg-[#181411] p-4 rounded-lg border border-slate-100 dark:border-[#3a2f27]">
+                                            <p className="text-sm text-slate-600 dark:text-[#bba99b]">{selectedTicket.employee_note}</p>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {selectedTicket.client_rating && (
+                                    <div>
+                                        <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Client Rating</label>
+                                        <div className="flex items-center gap-2">
+                                            {[...Array(5)].map((_, i) => (
+                                                <Star
+                                                    key={i}
+                                                    size={20}
+                                                    className={i < selectedTicket.client_rating ? 'fill-yellow-400 text-yellow-400' : 'text-slate-300'}
+                                                />
+                                            ))}
+                                            <span className="ml-2 text-sm font-semibold text-slate-900 dark:text-white">{selectedTicket.client_rating}/5</span>
+                                        </div>
+                                        {selectedTicket.rating_comment && (
+                                            <p className="mt-3 text-sm text-slate-600 dark:text-[#bba99b] italic">"{selectedTicket.rating_comment}"</p>
+                                        )}
+                                    </div>
+                                )}
+
+                                {selectedTicket.status !== 'resolved' && (
+                                    <div className="pt-6 border-t border-slate-100 dark:border-[#3a2f27] space-y-6">
+                                        <div className="flex flex-col gap-3">
+                                            {!selectedTicket.id_employee ? (
+                                                <div className="flex gap-3">
+                                                    <button
+                                                        onClick={() => handleClaimTicket(selectedTicket.id)}
+                                                        disabled={Boolean(actionLoading[`claim-${selectedTicket.id}`])}
+                                                        className="flex-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-amber-600/20"
+                                                    >
+                                                        <span className="material-symbols-outlined text-lg">check_circle</span>
+                                                        {actionLoading[`claim-${selectedTicket.id}`] ? 'Claiming...' : 'Claim Ticket'}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleEscalate(selectedTicket.id)}
+                                                        disabled={Boolean(actionLoading[`escalate-${selectedTicket.id}`])}
+                                                        className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-600/20"
+                                                    >
+                                                        <span className="material-symbols-outlined text-lg">warning</span>
+                                                        {actionLoading[`escalate-${selectedTicket.id}`] ? 'Escalating...' : 'Escalate to IT'}
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <div className="flex flex-col gap-3">
+                                                    <div className="flex gap-3">
+                                                        <button
+                                                            onClick={() => handleResolve(selectedTicket.id)}
+                                                            disabled={Boolean(actionLoading[`resolve-${selectedTicket.id}`])}
+                                                            className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-green-600/20"
+                                                        >
+                                                            <span className="material-symbols-outlined text-lg">check_circle</span>
+                                                            {actionLoading[`resolve-${selectedTicket.id}`] ? 'Resolving...' : 'Resolve Ticket'}
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleEscalate(selectedTicket.id)}
+                                                            disabled={Boolean(actionLoading[`escalate-${selectedTicket.id}`])}
+                                                            className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-red-600/20"
+                                                        >
+                                                            <span className="material-symbols-outlined text-lg">warning</span>
+                                                            {actionLoading[`escalate-${selectedTicket.id}`] ? 'Escalating...' : 'Escalate to IT'}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
                         </div>
 
-                        <div className="p-6 space-y-4">
-                            <div>
-                                <label className="text-sm font-bold text-slate-900 dark:text-white mb-2 block">Message</label>
-                                <textarea
-                                    value={messageText}
-                                    onChange={(e) => setMessageText(e.target.value)}
-                                    placeholder="Type your message to the client..."
-                                    className="w-full bg-slate-50 dark:bg-[#181411] border border-slate-200 dark:border-[#3a2f27] rounded-lg p-3 text-sm focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white placeholder-slate-400 min-h-[120px]"
-                                />
+                        {/* Right side - Chat Panel */}
+                        <div className="w-96 flex flex-col bg-slate-50 dark:bg-[#181411]">
+                            {/* Chat Header */}
+                            <div className="p-4 border-b border-slate-200 dark:border-[#3a2f27] bg-white dark:bg-[#1e1a16]">
+                                <h4 className="font-bold text-slate-900 dark:text-white text-sm">Chat with Client</h4>
+                                <p className="text-xs text-[#bba99b] mt-0.5">{selectedTicket.client?.nom || selectedTicket.client?.name || 'Client'}</p>
                             </div>
 
-                            <div className="flex gap-3 justify-end">
-                                <button
-                                    onClick={() => setShowMessageModal(false)}
-                                    className="px-6 py-2 border border-slate-200 dark:border-[#3a2f27] rounded-lg text-slate-700 dark:text-slate-300 font-semibold hover:bg-slate-50 dark:hover:bg-[#3a2f27] transition-colors"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    onClick={handleSendMessage}
-                                    disabled={isSubmittingMessage || !messageText.trim()}
-                                    className="px-6 py-2 bg-primary hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition-all flex items-center gap-2"
-                                >
-                                    <Send size={16} />
-                                    Send Message
-                                </button>
+                            {/* Messages Area */}
+                            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                                {loadingMessages ? (
+                                    <div className="flex items-center justify-center h-full">
+                                        <div className="text-center">
+                                            <div className="animate-spin mb-3 inline-block">
+                                                <span className="material-symbols-outlined text-3xl text-primary">refresh</span>
+                                            </div>
+                                            <p className="text-sm text-slate-500 dark:text-slate-400">Loading messages...</p>
+                                        </div>
+                                    </div>
+                                ) : conversationMessages && conversationMessages.length > 0 ? (
+                                    conversationMessages.map((msg, idx) => (
+                                        <div key={idx} className={`flex ${isMessageFromCurrentEmployee(msg) ? 'justify-end' : 'justify-start'}`}>
+                                            <div className={`max-w-xs px-4 py-2 rounded-lg ${
+                                                isMessageFromCurrentEmployee(msg)
+                                                    ? 'bg-primary text-white rounded-br-none' 
+                                                    : 'bg-white dark:bg-[#3a2f27] text-slate-900 dark:text-white rounded-bl-none'
+                                            }`}>
+                                                <p className="text-sm break-words">{msg.message}</p>
+                                                <p className={`text-[10px] mt-1 ${isMessageFromCurrentEmployee(msg) ? 'text-white/70' : 'text-slate-500 dark:text-slate-400'}`}>
+                                                    {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    ))
+                                ) : (
+                                    <div className="flex items-center justify-center h-full text-center">
+                                        <div>
+                                            <span className="material-symbols-outlined text-4xl text-slate-300 dark:text-slate-600 block mb-2">mark_email_unread</span>
+                                            <p className="text-sm text-slate-500 dark:text-slate-400">No messages yet. Start the conversation!</p>
+                                        </div>
+                                    </div>
+                                )}
+                                <div ref={messagesEndRef} />
+                            </div>
+
+                            {/* Message Input */}
+                            <div className="p-4 border-t border-slate-200 dark:border-[#3a2f27] bg-white dark:bg-[#1e1a16]">
+                                <div className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={messageText}
+                                        onChange={(e) => setMessageText(e.target.value)}
+                                        onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
+                                        placeholder="Type a message..."
+                                        className="flex-1 bg-slate-100 dark:bg-[#3a2f27] border border-slate-200 dark:border-[#55463a] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white placeholder-slate-400"
+                                    />
+                                    <button
+                                        onClick={handleSendMessage}
+                                        disabled={isSubmittingMessage || !messageText.trim()}
+                                        className="bg-primary hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white p-2 rounded-lg transition-all"
+                                    >
+                                        {isSubmittingMessage ? (
+                                            <span className="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
+                                        ) : (
+                                            <Send size={18} />
+                                        )}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>

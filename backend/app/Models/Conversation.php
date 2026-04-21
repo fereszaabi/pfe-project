@@ -11,7 +11,9 @@ class Conversation extends Model
 
     protected $fillable = [
         'sender_id',
+        'sender_type',
         'recipient_id',
+        'recipient_type',
         'last_message_at',
     ];
 
@@ -20,22 +22,6 @@ class Conversation extends Model
         'updated_at' => 'datetime',
         'last_message_at' => 'datetime',
     ];
-
-    /**
-     * Get the sender user
-     */
-    public function sender()
-    {
-        return $this->belongsTo(User::class, 'sender_id');
-    }
-
-    /**
-     * Get the recipient user
-     */
-    public function recipient()
-    {
-        return $this->belongsTo(User::class, 'recipient_id');
-    }
 
     /**
      * Get all messages in this conversation
@@ -69,7 +55,68 @@ class Conversation extends Model
      */
     public function getOtherParticipant($userId)
     {
-        return $this->sender_id === $userId ? $this->recipient : $this->sender;
+        if ($this->sender_id === $userId) {
+            // Return recipient using type info if available
+            if ($this->recipient_type) {
+                return match ($this->recipient_type) {
+                    'employee' => \App\Models\Employee::find($this->recipient_id),
+                    'client' => \App\Models\Client::find($this->recipient_id),
+                    'user' => User::find($this->recipient_id),
+                    default => User::find($this->recipient_id),
+                };
+            }
+            
+            // Fallback: Try all tables
+            $user = User::find($this->recipient_id);
+            if ($user) return $user;
+            
+            $employee = \App\Models\Employee::find($this->recipient_id);
+            if ($employee) return $employee;
+            
+            return \App\Models\Client::find($this->recipient_id);
+        } else {
+            // Return sender using type info if available
+            if ($this->sender_type) {
+                return match ($this->sender_type) {
+                    'employee' => \App\Models\Employee::find($this->sender_id),
+                    'client' => \App\Models\Client::find($this->sender_id),
+                    'user' => User::find($this->sender_id),
+                    default => User::find($this->sender_id),
+                };
+            }
+            
+            // Fallback: Try all tables
+            $user = User::find($this->sender_id);
+            if ($user) return $user;
+            
+            $employee = \App\Models\Employee::find($this->sender_id);
+            if ($employee) return $employee;
+            
+            return \App\Models\Client::find($this->sender_id);
+        }
+    }
+
+    /**
+     * Find or create conversation between two users with specified types
+     */
+    public static function findOrCreateBetweenWithTypes($userId1, $userType1, $userId2, $userType2)
+    {
+        // Ensure consistent ordering
+        $ids = [$userId1, $userId2];
+        $types = [$userType1, $userType2];
+        
+        if ($userId1 > $userId2) {
+            $ids = [$userId2, $userId1];
+            $types = [$userType2, $userType1];
+        }
+
+        return self::firstOrCreate([
+            'sender_id' => $ids[0],
+            'recipient_id' => $ids[1],
+        ], [
+            'sender_type' => $types[0],
+            'recipient_type' => $types[1],
+        ]);
     }
 
     /**

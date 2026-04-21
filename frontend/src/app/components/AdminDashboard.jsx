@@ -88,6 +88,26 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const escalatedTickets = tickets.filter(t => t.status === 'tech').length;
     const resolutionRate = totalTickets > 0 ? Math.round((resolvedTickets / totalTickets) * 100) : 0;
 
+    const respondedTickets = tickets.filter((ticket) => ticket?.created_at && ticket?.assigned_at);
+    const avgFirstResponseHours = respondedTickets.length > 0
+        ? respondedTickets.reduce((sum, ticket) => {
+            const createdAt = new Date(ticket.created_at).getTime();
+            const assignedAt = new Date(ticket.assigned_at).getTime();
+
+            if (!Number.isFinite(createdAt) || !Number.isFinite(assignedAt) || assignedAt < createdAt) {
+                return sum;
+            }
+
+            return sum + (assignedAt - createdAt) / (1000 * 60 * 60);
+        }, 0) / respondedTickets.length
+        : null;
+
+    const formattedAvgFirstResponse = avgFirstResponseHours === null
+        ? '--'
+        : avgFirstResponseHours < 1
+            ? `${Math.max(1, Math.round(avgFirstResponseHours * 60))}m`
+            : `${avgFirstResponseHours.toFixed(1)}h`;
+
     // Get top performer from leaderboard
     const topPerformer = leaderboard.length > 0 ? {
         employee: { nom: leaderboard[0].name },
@@ -191,6 +211,13 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                     >
                         <span className="material-symbols-outlined">confirmation_number</span>
                         <span className="text-sm font-medium">Ticket Management</span>
+                    </button>
+                    <button
+                        onClick={() => onNavigate?.('escalated')}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:bg-surface-dark/50 hover:text-white rounded-lg transition-colors"
+                    >
+                        <span className="material-symbols-outlined">priority_high</span>
+                        <span className="text-sm font-medium">Escalated Queue</span>
                     </button>
                     <button
                         onClick={() => setActiveTab('users')}
@@ -315,15 +342,15 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
 
                                 <div className="bg-white dark:bg-midnight-accent p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
                                     <div className="flex items-center justify-between mb-4">
-                                        <span className="text-slate-500 dark:text-slate-400 text-sm font-medium">Avg Response</span>
+                                        <span className="text-slate-500 dark:text-slate-400 text-sm font-medium">Avg First Response</span>
                                         <div className="size-8 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-500">
                                             <span className="material-symbols-outlined text-xl">avg_time</span>
                                         </div>
                                     </div>
                                     <div className="flex items-end gap-3 text-slate-900 dark:text-white">
-                                        <h3 className="text-3xl font-bold">2h 15m</h3>
-                                        <span className="text-emerald-500 text-xs font-bold mb-1 flex items-center gap-0.5">
-                                            <span className="material-symbols-outlined text-xs">trending_down</span> -8%
+                                        <h3 className="text-3xl font-bold">{formattedAvgFirstResponse}</h3>
+                                        <span className="text-slate-400 text-xs font-bold mb-1">
+                                            {respondedTickets.length} tickets
                                         </span>
                                     </div>
                                 </div>

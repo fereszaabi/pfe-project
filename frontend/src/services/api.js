@@ -1,4 +1,4 @@
-const BASE = '/api';
+const BASE = 'http://127.0.0.1:8000/api';
 
 function getToken() {
     return localStorage.getItem('auth_token');
@@ -71,6 +71,12 @@ export const getMachines = () =>
 export const getClientMachines = () =>
     apiRequest('GET', '/client/machines');
 
+export const getClientProfile = () =>
+    apiRequest('GET', '/client/profile');
+
+export const askSupportBot = (message, history = []) =>
+    apiRequest('POST', '/client/support-bot', { message, history });
+
 export const createMachine = (data) =>
     apiRequest('POST', '/client/machines', data);
 
@@ -105,12 +111,18 @@ export const getEmployeeStats = () =>
 export const getEmployeeLeaderboard = (limit = 10) =>
     apiRequest('GET', `/employee/leaderboard?limit=${limit}`);
 
+export const getItTickets = () =>
+    apiRequest('GET', '/it/tickets');
+
 // ── Messaging ────────────────────────────────────────────────────────
 export const getConversations = () =>
     apiRequest('GET', '/messages/conversations');
 
 export const getConversationMessages = (conversationId) =>
     apiRequest('GET', `/messages/conversations/${conversationId}`);
+
+export const getTicketMessages = (ticketId) =>
+    apiRequest('GET', `/messages/tickets/${ticketId}`);
 
 export const sendMessage = (data) =>
     apiRequest('POST', '/messages/send', data);
@@ -125,8 +137,11 @@ export const getUnreadMessages = () =>
     apiRequest('GET', '/messages/unread');
 
 // ── Client Rating ────────────────────────────────────────────────────
-export const rateEmployee = (ticketId, rating) =>
-    apiRequest('POST', `/client/tickets/${ticketId}/rate`, { rating });
+export const rateEmployee = (ticketId, rating, ratingComment = '') =>
+    apiRequest('POST', `/client/tickets/${ticketId}/rate`, {
+        rating,
+        rating_comment: ratingComment,
+    });
 
 // ── Admin ────────────────────────────────────────────────────────────
 export const getAdminDemandes = () =>

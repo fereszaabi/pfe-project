@@ -29,10 +29,13 @@ class ClientController extends Controller
         $demandes = Demande::where('id_client', $clientId)
             ->select([
                 'id',
+                'titre',
                 'status',
                 'description',
                 'priority',
                 'employee_note',
+                'client_rating',
+                'rating_comment',
                 'created_at',
                 'image',
             ])
@@ -196,18 +199,27 @@ class ClientController extends Controller
         // Validate rating
         $request->validate([
             'rating' => 'required|integer|min:1|max:5',
+            'rating_comment' => 'nullable|string|max:1000',
         ]);
 
-        // Only allow rating resolved tickets
-        if ($ticket->status !== 'resolved') {
+        // Only allow rating completed tickets
+        if (!in_array($ticket->status, ['resolved', 'closed'], true)) {
             return response()->json([
                 'message' => 'Can only rate completed/resolved tickets'
+            ], 422);
+        }
+
+        // Prevent multiple ratings for the same ticket.
+        if (!is_null($ticket->client_rating)) {
+            return response()->json([
+                'message' => 'This ticket has already been rated'
             ], 422);
         }
 
         // Update the ticket with client rating
         $ticket->update([
             'client_rating' => $request->rating,
+            'rating_comment' => $request->input('rating_comment'),
         ]);
 
         // Recalculate employee performance if ticket is assigned

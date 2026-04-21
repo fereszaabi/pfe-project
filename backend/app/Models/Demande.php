@@ -27,6 +27,7 @@ class Demande extends Model
         'completed_at',
         'resolution_hours',
         'client_rating',
+        'rating_comment',
         'reopen_count',
         'ticket_cost',
         'total_cost',
@@ -35,6 +36,8 @@ class Demande extends Model
         'payment_notes',
         'insufficient_funds',
         'admin_approved_override',
+        'escalated_to',
+        'escalated_at',
     ];
 
     protected $casts = [
@@ -42,6 +45,7 @@ class Demande extends Model
         'end_at' => 'datetime',
         'assigned_at' => 'datetime',
         'completed_at' => 'datetime',
+        'escalated_at' => 'datetime',
         'paid_at' => 'datetime',
         'resolution_hours' => 'decimal:2',
         'ticket_cost' => 'decimal:3',

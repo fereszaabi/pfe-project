@@ -1,40 +1,114 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { getItTickets, updateEmployeeTicket } from '../../services/api';
 
-export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate, activeView }) {
+export function Escalated({ user, onLogout, onNavigate, activeView }) {
     const [selectedTicket, setSelectedTicket] = useState(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [activeTab, setActiveTab] = useState('escalated'); // 'escalated' | 'onsite'
+    const [escalatedToFilter, setEscalatedToFilter] = useState('all'); // 'all' | 'ensight' | 'it'
+    const [allTickets, setAllTickets] = useState([]);
+    const [escalatedBaseTickets, setEscalatedBaseTickets] = useState([]);
+    const [onsiteBaseTickets, setOnsiteBaseTickets] = useState([]);
+    const [ticketCounts, setTicketCounts] = useState({ all: 0, escalated: 0, onsite: 0 });
+    const [loading, setLoading] = useState(false);
+    const [claimingTicketId, setClaimingTicketId] = useState(null);
 
     const priorityOrder = { urgent: 0, high: 1, medium: 2, low: 3 };
+    const getEscalatedTarget = (ticket) => (ticket?.escalated_to || '').toLowerCase();
+
+    // Fetch tickets from API
+    const fetchTickets = () => {
+        setLoading(true);
+        getItTickets()
+            .then((data) => {
+                console.log('Escalated tickets data:', data);
+                const all = data.all_tickets?.data ?? data.all_tickets ?? [];
+                const escalated = data.escalated_tickets?.data ?? data.escalated_tickets ?? [];
+                const onsite = data.onsite_tickets?.data ?? data.onsite_tickets ?? [];
+
+                setAllTickets(all);
+                setEscalatedBaseTickets(escalated);
+                setOnsiteBaseTickets(onsite);
+                setTicketCounts({
+                    all: Number(data?.counts?.all ?? all.length),
+                    escalated: Number(data?.counts?.escalated ?? escalated.length),
+                    onsite: Number(data?.counts?.onsite ?? onsite.length),
+                });
+            })
+            .catch((err) => {
+                console.error('Failed to fetch escalated tickets:', err);
+                setAllTickets([]);
+                setEscalatedBaseTickets([]);
+                setOnsiteBaseTickets([]);
+                setTicketCounts({ all: 0, escalated: 0, onsite: 0 });
+            })
+            .finally(() => setLoading(false));
+    };
+
+    useEffect(() => {
+        fetchTickets();
+    }, []);
 
     // Tickets escalated to IT/Technical service
-    const escalatedTickets = tickets
-        .filter(t => t.status === 'escalated')
+    const escalatedTickets = escalatedBaseTickets
+        .filter(t => {
+            const escalatedTarget = getEscalatedTarget(t);
+
+            // Filter by escalated_to department
+            if (escalatedToFilter === 'ensight') {
+                return escalatedTarget.includes('ensight');
+            } else if (escalatedToFilter === 'it') {
+                return escalatedTarget.includes('it') && !escalatedTarget.includes('ensight');
+            }
+            // 'all' shows all escalated tickets
+            return true;
+        })
         .filter(t =>
             searchQuery === '' ||
-            t.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            t.clientName?.toLowerCase().includes(searchQuery.toLowerCase())
+            t.titre?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            t.client?.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            t.client?.nom?.toLowerCase().includes(searchQuery.toLowerCase())
         )
         .sort((a, b) => (priorityOrder[a.priority] ?? 4) - (priorityOrder[b.priority] ?? 4));
 
-    // Tickets that require onsite intervention (category: 'technical', not yet resolved)
-    const onsiteTickets = tickets
-        .filter(t => t.category === 'technical' && t.status !== 'resolved')
+    // Tickets that require onsite intervention (status: 'assigned' or 'in-progress', not yet resolved)
+    const onsiteTickets = onsiteBaseTickets
         .filter(t =>
             searchQuery === '' ||
-            t.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            t.clientName?.toLowerCase().includes(searchQuery.toLowerCase())
+            t.titre?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            t.client?.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            t.client?.nom?.toLowerCase().includes(searchQuery.toLowerCase())
         )
         .sort((a, b) => (priorityOrder[a.priority] ?? 4) - (priorityOrder[b.priority] ?? 4));
 
     const displayed = activeTab === 'escalated' ? escalatedTickets : onsiteTickets;
 
-    const handleResolve = (ticketId) => {
-        onUpdateTicket(ticketId, {
-            status: 'resolved',
-            resolvedAt: new Date().toISOString(),
-        });
-        setSelectedTicket(null);
+    const handleClaimTicket = async (ticketId) => {
+        setClaimingTicketId(ticketId);
+        try {
+            await updateEmployeeTicket(ticketId, {
+                status: 'in progress'
+            });
+            fetchTickets();
+            setSelectedTicket(null);
+        } catch (err) {
+            console.error('Failed to claim ticket:', err);
+        } finally {
+            setClaimingTicketId(null);
+        }
+    };
+
+    const handleResolve = async (ticketId) => {
+        try {
+            await updateEmployeeTicket(ticketId, {
+                status: 'resolved',
+                resolvedAt: new Date().toISOString(),
+            });
+            fetchTickets();
+            setSelectedTicket(null);
+        } catch (err) {
+            console.error('Failed to resolve ticket:', err);
+        }
     };
 
     const priorityBadge = (priority) => {
@@ -96,7 +170,7 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                             <span className={`ml-auto text-[10px] px-2 py-0.5 rounded-full ${
                                 activeView === 'dashboard' ? 'bg-primary text-white' : 'bg-surface-dark text-slate-400'
                             }`}>
-                                {tickets.filter(t => t.assignedTo === user.name).length}
+                                {allTickets.filter(t => t.employee?.id === user.id).length}
                             </span>
                         </button>
                         <button
@@ -110,7 +184,7 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                             <span className={`ml-auto text-[10px] px-2 py-0.5 rounded-full ${
                                 activeView === 'escalated' ? 'bg-primary text-white' : 'bg-surface-dark text-slate-400'
                             }`}>
-                                {tickets.filter(t => t.status === 'escalated').length}
+                                {ticketCounts.escalated}
                             </span>
                         </button>
                         <button
@@ -205,21 +279,21 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                         <span className="material-symbols-outlined text-lg">escalator_warning</span>
                                     </div>
                                 </div>
-                                <h3 className="text-3xl font-bold text-slate-900 dark:text-white">{tickets.filter(t => t.status === 'escalated').length}</h3>
+                                <h3 className="text-3xl font-bold text-slate-900 dark:text-white">{ticketCounts.escalated}</h3>
                                 <p className="text-[10px] text-[#bba99b] mt-2 uppercase tracking-wide">Awaiting IT resolution</p>
                             </div>
 
                             <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm flex flex-col">
                                 <div className="flex items-center justify-between mb-4">
-                                    <span className="text-slate-500 dark:text-[#bba99b] text-sm font-medium">Onsite Intervention Required</span>
-                                    <div className="size-8 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-500">
-                                        <span className="material-symbols-outlined text-lg">location_on</span>
+                                    <span className="text-slate-500 dark:text-[#bba99b] text-sm font-medium">Ensight Tech Support</span>
+                                    <div className="size-8 rounded-lg bg-orange-500/10 flex items-center justify-center text-orange-500">
+                                        <span className="material-symbols-outlined text-lg">business</span>
                                     </div>
                                 </div>
                                 <h3 className="text-3xl font-bold text-slate-900 dark:text-white">
-                                    {tickets.filter(t => t.category === 'technical' && t.status !== 'resolved').length}
+                                    {escalatedBaseTickets.filter(t => getEscalatedTarget(t).includes('ensight')).length}
                                 </h3>
-                                <p className="text-[10px] text-[#bba99b] mt-2 uppercase tracking-wide">Technical category — field visit needed</p>
+                                <p className="text-[10px] text-[#bba99b] mt-2 uppercase tracking-wide">Escalated to Ensight team</p>
                             </div>
 
                             <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm flex flex-col">
@@ -230,10 +304,7 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                     </div>
                                 </div>
                                 <h3 className="text-3xl font-bold text-slate-900 dark:text-white">
-                                    {tickets.filter(t =>
-                                        t.priority === 'urgent' &&
-                                        (t.status === 'escalated' || (t.category === 'technical' && t.status !== 'resolved'))
-                                    ).length}
+                                    {escalatedBaseTickets.filter(t => t.priority === 'urgent').length}
                                 </h3>
                                 <p className="text-[10px] text-[#bba99b] mt-2 uppercase tracking-wide">Requires immediate action</p>
                             </div>
@@ -270,6 +341,63 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                 </div>
                                 <p className="text-xs text-[#bba99b]">Sorted by priority — urgent first</p>
                             </div>
+
+                            {/* Escalation Department Filter - Only show when on escalated tab */}
+                            {activeTab === 'escalated' && (
+                                <div className="px-6 py-4 border-b border-slate-200 dark:border-[#3a2f27] bg-slate-50 dark:bg-[#181411]/50">
+                                    <p className="text-xs font-bold text-[#bba99b] uppercase tracking-wider mb-3">Filter by Support Team</p>
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            onClick={() => setEscalatedToFilter('all')}
+                                            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                                                escalatedToFilter === 'all'
+                                                    ? 'bg-primary text-white shadow'
+                                                    : 'bg-white dark:bg-[#3a2f27] text-slate-600 dark:text-[#bba99b] border border-slate-200 dark:border-[#55463a] hover:border-primary'
+                                            }`}
+                                        >
+                                            All Teams
+                                        </button>
+                                        <button
+                                            onClick={() => setEscalatedToFilter('ensight')}
+                                            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                                                escalatedToFilter === 'ensight'
+                                                    ? 'bg-orange-600 text-white shadow'
+                                                    : 'bg-white dark:bg-[#3a2f27] text-slate-600 dark:text-[#bba99b] border border-slate-200 dark:border-[#55463a] hover:border-orange-600'
+                                            }`}
+                                        >
+                                            <span className="material-symbols-outlined text-sm">business</span>
+                                            Ensight Tech Support
+                                            {escalatedBaseTickets.filter(t => getEscalatedTarget(t).includes('ensight')).length > 0 && (
+                                                <span className="ml-1 px-1.5 py-0 rounded text-[10px] font-bold bg-white/20">
+                                                    {escalatedBaseTickets.filter(t => getEscalatedTarget(t).includes('ensight')).length}
+                                                </span>
+                                            )}
+                                        </button>
+                                        <button
+                                            onClick={() => setEscalatedToFilter('it')}
+                                            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                                                escalatedToFilter === 'it'
+                                                    ? 'bg-blue-600 text-white shadow'
+                                                    : 'bg-white dark:bg-[#3a2f27] text-slate-600 dark:text-[#bba99b] border border-slate-200 dark:border-[#55463a] hover:border-blue-600'
+                                            }`}
+                                        >
+                                            <span className="material-symbols-outlined text-sm">computer</span>
+                                            IT Department
+                                            {escalatedBaseTickets.filter(t => {
+                                                const escalatedTarget = getEscalatedTarget(t);
+                                                return escalatedTarget.includes('it') && !escalatedTarget.includes('ensight');
+                                            }).length > 0 && (
+                                                <span className="ml-1 px-1.5 py-0 rounded text-[10px] font-bold bg-white/20">
+                                                    {escalatedBaseTickets.filter(t => {
+                                                        const escalatedTarget = getEscalatedTarget(t);
+                                                        return escalatedTarget.includes('it') && !escalatedTarget.includes('ensight');
+                                                    }).length}
+                                                </span>
+                                            )}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Context description */}
                             <div className={`px-6 py-3 text-xs font-medium flex items-center gap-2 ${
@@ -336,16 +464,16 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                                     <td className="px-6 py-5">
                                                         <div className="flex items-center gap-3">
                                                             <div className="size-8 rounded-full bg-slate-200 dark:bg-[#3a2f27] flex items-center justify-center text-primary font-bold text-xs shrink-0">
-                                                                {ticket.clientName?.charAt(0)}
+                                                                {ticket.client?.name?.charAt(0)}
                                                             </div>
                                                             <div>
-                                                                <p className="font-bold text-slate-900 dark:text-white line-clamp-1">{ticket.clientName}</p>
+                                                                <p className="font-bold text-slate-900 dark:text-white line-clamp-1">{ticket.client?.name}</p>
                                                                 <span className="text-[10px] text-[#bba99b] font-bold">#{ticket.id?.slice(0, 8)}</span>
                                                             </div>
                                                         </div>
                                                     </td>
                                                     <td className="px-6 py-5">
-                                                        <p className="font-semibold text-slate-900 dark:text-white mb-0.5 line-clamp-1">{ticket.title}</p>
+                                                        <p className="font-semibold text-slate-900 dark:text-white mb-0.5 line-clamp-1">{ticket.titre}</p>
                                                         <p className="text-xs text-[#bba99b] line-clamp-1">{ticket.description}</p>
                                                     </td>
                                                     <td className="px-6 py-5">
@@ -357,16 +485,16 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                                         <td className="px-6 py-5">
                                                             <div className="flex items-center gap-1.5 text-xs font-bold text-red-400">
                                                                 <span className="material-symbols-outlined text-sm">business</span>
-                                                                {ticket.escalatedTo || 'IT Department'}
+                                                                {ticket.escalated_to || 'IT Department'}
                                                             </div>
                                                         </td>
                                                     )}
                                                     {activeTab === 'onsite' && (
                                                         <td className="px-6 py-5">
-                                                            {ticket.assignedTo ? (
+                                                            {ticket.employee?.name ? (
                                                                 <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300">
                                                                     <span className="material-symbols-outlined text-sm">person</span>
-                                                                    {ticket.assignedTo}
+                                                                    {ticket.employee?.name}
                                                                 </div>
                                                             ) : (
                                                                 <span className="text-xs text-[#bba99b] italic">Unassigned</span>
@@ -375,8 +503,8 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                                     )}
                                                     <td className="px-6 py-5">
                                                         <p className="text-xs text-[#bba99b] whitespace-nowrap">
-                                                            {(ticket.escalatedAt || ticket.createdAt)
-                                                                ? new Date(ticket.escalatedAt || ticket.createdAt).toLocaleDateString('en-GB', {
+                                                            {(ticket.escalated_at || ticket.created_at)
+                                                                ? new Date(ticket.escalated_at || ticket.created_at).toLocaleDateString('en-GB', {
                                                                     day: '2-digit', month: 'short', year: 'numeric'
                                                                 })
                                                                 : '—'}
@@ -445,14 +573,8 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                     <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${statusBadge(selectedTicket.status)}`}>
                                         {selectedTicket.status}
                                     </span>
-                                    {selectedTicket.category === 'technical' && (
-                                        <span className="flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-500 border border-amber-500/20">
-                                            <span className="material-symbols-outlined text-xs">location_on</span>
-                                            ONSITE
-                                        </span>
-                                    )}
                                 </div>
-                                <p className="text-sm text-[#bba99b]">{selectedTicket.clientName}</p>
+                                <p className="text-sm text-[#bba99b]">{selectedTicket.client?.name}</p>
                             </div>
                             <button
                                 onClick={() => setSelectedTicket(null)}
@@ -466,13 +588,7 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                             <div className="grid grid-cols-2 gap-6">
                                 <div>
                                     <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Issue Title</label>
-                                    <p className="text-lg font-bold text-slate-900 dark:text-white">{selectedTicket.title}</p>
-                                </div>
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Category</label>
-                                    <span className="px-2 py-1 bg-primary/10 text-primary text-[10px] font-bold rounded uppercase">
-                                        {selectedTicket.category}
-                                    </span>
+                                    <p className="text-lg font-bold text-slate-900 dark:text-white">{selectedTicket.titre}</p>
                                 </div>
                             </div>
 
@@ -491,9 +607,9 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                     <div>
                                         <p className="text-sm font-bold text-red-500">Escalated to Technical Service</p>
                                         <p className="text-xs text-[#bba99b] mt-1">
-                                            Forwarded to <span className="text-white font-bold">{selectedTicket.escalatedTo || 'IT Department'}</span>
-                                            {selectedTicket.escalatedAt && (
-                                                <> on {new Date(selectedTicket.escalatedAt).toLocaleString('en-GB', {
+                                            Forwarded to <span className="text-white font-bold">{selectedTicket.escalated_to || 'IT Department'}</span>
+                                            {selectedTicket.escalated_at && (
+                                                <> on {new Date(selectedTicket.escalated_at).toLocaleString('en-GB', {
                                                     day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit'
                                                 })}</>
                                             )}.
@@ -502,28 +618,28 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                                 </div>
                             )}
 
-                            {selectedTicket.category === 'technical' && selectedTicket.status !== 'escalated' && (
-                                <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-4 flex items-start gap-3">
-                                    <span className="material-symbols-outlined text-amber-500 text-xl mt-0.5">location_on</span>
-                                    <div>
-                                        <p className="text-sm font-bold text-amber-500">Onsite Intervention Required</p>
-                                        <p className="text-xs text-[#bba99b] mt-1">This is a technical issue that requires a field technician to visit the client's premises.</p>
-                                    </div>
-                                </div>
-                            )}
-
                             <div className="grid grid-cols-2 gap-4 text-xs">
-                                {selectedTicket.assignedTo && (
+                                <div>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-1">Client Email</label>
+                                    <p className="text-slate-700 dark:text-white font-medium break-all">{selectedTicket.client?.email || 'N/A'}</p>
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-1">Client Phone</label>
+                                    <p className="text-slate-700 dark:text-white font-medium">
+                                        {selectedTicket.client?.phone_number || (selectedTicket.client?.phone_numbers?.[0]?.numero) || 'N/A'}
+                                    </p>
+                                </div>
+                                {selectedTicket.employee?.name && (
                                     <div>
                                         <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-1">Assigned Agent</label>
-                                        <p className="text-slate-700 dark:text-white font-medium">{selectedTicket.assignedTo}</p>
+                                        <p className="text-slate-700 dark:text-white font-medium">{selectedTicket.employee?.name}</p>
                                     </div>
                                 )}
-                                {selectedTicket.createdAt && (
+                                {selectedTicket.created_at && (
                                     <div>
                                         <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-1">Submitted</label>
                                         <p className="text-slate-700 dark:text-white font-medium">
-                                            {new Date(selectedTicket.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })}
+                                            {new Date(selectedTicket.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })}
                                         </p>
                                     </div>
                                 )}
@@ -539,14 +655,19 @@ export function Escalated({ user, tickets, onUpdateTicket, onLogout, onNavigate,
                             )}
 
                             {selectedTicket.status !== 'resolved' && (
-                                <div className="pt-4 border-t border-slate-100 dark:border-[#3a2f27]">
-                                    <button
-                                        onClick={() => handleResolve(selectedTicket.id)}
-                                        className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-green-600/20 text-sm"
-                                    >
-                                        <span className="material-symbols-outlined">check_circle</span>
-                                        Mark as Resolved
-                                    </button>
+                                <div className="pt-4 border-t border-slate-100 dark:border-[#3a2f27] space-y-3">
+                                    {selectedTicket.status === 'escalated' && (
+                                        <button
+                                            onClick={() => handleClaimTicket(selectedTicket.id)}
+                                            disabled={claimingTicketId === selectedTicket.id}
+                                            className="w-full bg-primary hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-primary/20 text-sm"
+                                        >
+                                            <span className="material-symbols-outlined">
+                                                {claimingTicketId === selectedTicket.id ? 'hourglass_empty' : 'assignment'}
+                                            </span>
+                                            {claimingTicketId === selectedTicket.id ? 'Claiming...' : 'Claim & Work on Ticket'}
+                                        </button>
+                                    )}
                                 </div>
                             )}
                         </div>

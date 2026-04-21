@@ -19,14 +19,52 @@ export default function App() {
 
     // Restore session from localStorage on first load
     useEffect(() => {
-        const storedUser = localStorage.getItem('auth_user');
-        const storedToken = localStorage.getItem('auth_token');
-        if (storedUser && storedToken) {
-            setCurrentUser(JSON.parse(storedUser));
-            setView('dashboard');
-        }
-        setAuthLoading(false);
-        window.history.replaceState({ view: storedUser ? 'dashboard' : 'login', activeView: 'dashboard' }, '');
+        let isMounted = true;
+
+        const restoreSession = async () => {
+            const storedToken = localStorage.getItem('auth_token');
+            const storedUser = localStorage.getItem('auth_user');
+
+            if (!storedToken || !storedUser) {
+                if (!isMounted) return;
+                setCurrentUser(null);
+                setView('login');
+                setActiveView('dashboard');
+                setAuthLoading(false);
+                window.history.replaceState({ view: 'login', activeView: 'dashboard' }, '');
+                return;
+            }
+
+            try {
+                const me = await api.getMe();
+                if (!isMounted) return;
+
+                localStorage.setItem('auth_user', JSON.stringify(me));
+                setCurrentUser(me);
+                setView('dashboard');
+                setActiveView('dashboard');
+                window.history.replaceState({ view: 'dashboard', activeView: 'dashboard' }, '');
+            } catch (_) {
+                if (!isMounted) return;
+
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('auth_user');
+                setCurrentUser(null);
+                setView('login');
+                setActiveView('dashboard');
+                window.history.replaceState({ view: 'login', activeView: 'dashboard' }, '');
+            } finally {
+                if (isMounted) {
+                    setAuthLoading(false);
+                }
+            }
+        };
+
+        restoreSession();
+
+        return () => {
+            isMounted = false;
+        };
     }, []);
 
     useEffect(() => {
@@ -47,13 +85,21 @@ export default function App() {
     }, []);
 
     const navigate = (newView, extra = {}) => {
-        const state = { view: newView, activeView: newView, ...extra };
+        const normalizedView = ['it', 'it-component', 'it-queue'].includes(newView) ? 'escalated' : newView;
+        const state = { view: normalizedView, activeView: normalizedView, ...extra };
         window.history.pushState(state, '');
-        setView(newView);
-        setActiveView(newView);
+        setView(normalizedView);
+        setActiveView(normalizedView);
     };
 
-    const handleNavigate = (newView) => navigate(newView);
+    const handleNavigate = (newView) => {
+        if (['it', 'it-component', 'it-queue', 'escalated'].includes(newView)) {
+            navigate('escalated');
+            return;
+        }
+
+        navigate(newView);
+    };
 
     const handleLogin = async (identifier, password, setError) => {
         try {
@@ -143,11 +189,14 @@ export default function App() {
         }
     }
 
-    if (view === 'escalated' && currentUser?.role === 'employee') {
+    if (
+        (view === 'escalated' || activeView === 'escalated') &&
+        (currentUser?.role === 'employee' || currentUser?.role === 'admin')
+    ) {
         return (
             <Escalated
                 user={currentUser}
-                activeView={activeView}
+                activeView='escalated'
                 onLogout={handleLogout}
                 onNavigate={handleNavigate}
             />

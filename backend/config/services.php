@@ -31,4 +31,10 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
 
+    'chatbot' => [
+        'url' => env('CHATBOT_URL'),
+        'api_key' => env('CHATBOT_API_KEY'),
+        'timeout' => env('CHATBOT_TIMEOUT', 20),
+    ],
+
 ];

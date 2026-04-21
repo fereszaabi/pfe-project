@@ -11,7 +11,6 @@ class Machine extends Model
 
     protected $fillable = [
         'nom_poste',
-        'numero_machine',
         'code_anydesk',
         'id_client',
     ];
