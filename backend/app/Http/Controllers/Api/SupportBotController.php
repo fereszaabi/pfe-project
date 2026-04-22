@@ -26,8 +26,11 @@ class SupportBotController extends Controller
 
         if (!$chatbotUrl) {
             return response()->json([
-                'message' => 'Quick support bot is not configured yet.',
-            ], 503);
+                'reply' => 'Quick support assistant is not fully configured yet. Please create a support ticket and our team will help you quickly.',
+                'meta' => [
+                    'source' => 'fallback',
+                ],
+            ]);
         }
 
         $http = Http::acceptJson()->timeout(max(5, $timeoutSeconds));
@@ -51,10 +54,18 @@ class SupportBotController extends Controller
             $response = $http->post($chatbotUrl, $payload);
 
             if (!$response->successful()) {
+                $details = $response->json('detail')
+                    ?? $response->json('message')
+                    ?? $response->body();
+
                 return response()->json([
-                    'message' => 'Quick support bot is currently unavailable.',
-                    'details' => $response->json('message') ?? null,
-                ], 502);
+                    'reply' => is_string($details) && trim($details) !== ''
+                        ? $details
+                        : 'Quick support assistant is temporarily unavailable. Please create a support ticket.',
+                    'meta' => [
+                        'source' => 'fallback',
+                    ],
+                ]);
             }
 
             $data = $response->json();
@@ -62,8 +73,11 @@ class SupportBotController extends Controller
 
             if (!is_string($reply) || trim($reply) === '') {
                 return response()->json([
-                    'message' => 'Quick support bot returned an invalid response.',
-                ], 502);
+                    'reply' => 'Quick support assistant returned an empty response. Please create a support ticket.',
+                    'meta' => [
+                        'source' => 'fallback',
+                    ],
+                ]);
             }
 
             return response()->json([
@@ -74,9 +88,13 @@ class SupportBotController extends Controller
             ]);
         } catch (\Throwable $e) {
             return response()->json([
-                'message' => 'Quick support bot request failed.',
-                'details' => app()->isLocal() ? $e->getMessage() : null,
-            ], 502);
+                'reply' => app()->isLocal()
+                    ? 'Quick support bridge error: ' . $e->getMessage()
+                    : 'Quick support assistant is unavailable. Please create a support ticket.',
+                'meta' => [
+                    'source' => 'fallback',
+                ],
+            ]);
         }
     }
 }

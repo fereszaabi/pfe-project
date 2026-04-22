@@ -12,7 +12,30 @@ from langchain_community.document_loaders import JSONLoader
 from langdetect import detect, LangDetectException
 from groq import Groq  # ✅ Groq Vision
 
+
+LANGUAGE_LABELS = {
+    "fr": "français",
+    "en": "anglais",
+    "ar": "arabe",
+}
+
+
+def resolve_response_language(text: str) -> str:
+    """Return a supported response language label for the prompt."""
+    cleaned = (text or "").strip()
+    if len(cleaned) < 4:
+        return LANGUAGE_LABELS["fr"]
+
+    try:
+        detected = detect(cleaned)
+    except LangDetectException:
+        detected = "fr"
+
+    # Keep chatbot output in explicit supported languages only.
+    return LANGUAGE_LABELS.get(detected, LANGUAGE_LABELS["fr"])
+
 load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 
 groq_api_key = os.getenv("GROQ_API_KEY")
 sentence_token = os.getenv("sentence-transformers_API_TOKEN")
@@ -21,7 +44,7 @@ if sentence_token:
     os.environ["HF_TOKEN"] = sentence_token
 
 # ✅ Client Groq Vision
-groq_client = Groq(api_key=groq_api_key)
+groq_client = Groq(api_key=groq_api_key) if groq_api_key else None
 
 def encode_image(image_path: str) -> tuple:
     """Encode l'image en base64."""
@@ -39,6 +62,8 @@ def encode_image(image_path: str) -> tuple:
 def describe_image(image_path: str, question: str = "") -> str:
     """Analyse l'image avec Groq Vision — pas de modèle local."""
     if not os.path.exists(image_path):
+        return ""
+    if not groq_client:
         return ""
     try:
         image_data, mime_type = encode_image(image_path)
@@ -79,58 +104,63 @@ Réponds en français de manière structurée."""
         print(f" Erreur Groq Vision : {e}")
         return ""
 
-# ── 1. Load data ──────────────────────────────────────────────────
-loader = CSVLoader('idsoft_produits_final.csv', encoding='latin-1')
-datacsv = loader.load()
+# ── 1. Optional retrieval stack (disabled by default for fast startup) ──────
+ENABLE_LOCAL_RETRIEVAL = os.getenv("ENABLE_LOCAL_RETRIEVAL", "0") == "1"
+retriever = None
 
-json_loader1 = JSONLoader(file_path="idsoft_training_data.json",
-    jq_schema=".", text_content=False)
-json_loader2 = JSONLoader(file_path="idsoft_training_data1.jsonl",
-    jq_schema='. | {text: (.instruction + " " + .output)}',
-    json_lines=True, text_content=False)
-json_loader3 = JSONLoader(file_path="idsoft_conversations.jsonl",
-    jq_schema='.', json_lines=True, text_content=False)
-json_loader4 = JSONLoader(file_path="idsoft_basic_conversations.jsonl",
-    jq_schema='.', json_lines=True, text_content=False)
-json_loader5 = JSONLoader(file_path="idsoft_basic_conversations.json",
-    jq_schema=".", text_content=False)
+if ENABLE_LOCAL_RETRIEVAL:
+    loader = CSVLoader('idsoft_produits_final.csv', encoding='latin-1')
+    datacsv = loader.load()
 
-json_data1 = json_loader1.load()
-json_data2 = json_loader2.load()
-json_data3 = json_loader3.load()
-json_data4 = json_loader4.load()
-json_data5 = json_loader5.load()
-data = datacsv + json_data1 + json_data2 + json_data3 + json_data4 + json_data5
+    json_loader1 = JSONLoader(file_path="idsoft_training_data.json",
+        jq_schema=".", text_content=False)
+    json_loader2 = JSONLoader(file_path="idsoft_training_data1.jsonl",
+        jq_schema='. | {text: (.instruction + " " + .output)}',
+        json_lines=True, text_content=False)
+    json_loader3 = JSONLoader(file_path="idsoft_conversations.jsonl",
+        jq_schema='.', json_lines=True, text_content=False)
+    json_loader4 = JSONLoader(file_path="idsoft_basic_conversations.jsonl",
+        jq_schema='.', json_lines=True, text_content=False)
+    json_loader5 = JSONLoader(file_path="idsoft_basic_conversations.json",
+        jq_schema=".", text_content=False)
 
-# ── 2. Setup ChromaDB ─────────────────────────────────────────────
-db_location = "./chroma_db"
-if os.path.exists(db_location):
-    shutil.rmtree(db_location)
-os.makedirs(db_location, exist_ok=True)
+    json_data1 = json_loader1.load()
+    json_data2 = json_loader2.load()
+    json_data3 = json_loader3.load()
+    json_data4 = json_loader4.load()
+    json_data5 = json_loader5.load()
+    data = datacsv + json_data1 + json_data2 + json_data3 + json_data4 + json_data5
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-)
-vector_store = Chroma(
-    collection_name="products",
-    persist_directory=db_location,
-    embedding_function=embeddings
-)
+    db_location = "./chroma_db"
+    if os.path.exists(db_location):
+        shutil.rmtree(db_location)
+    os.makedirs(db_location, exist_ok=True)
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
-data = text_splitter.split_documents(data)
-vector_store.add_documents(data)
-retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
+    vector_store = Chroma(
+        collection_name="products",
+        persist_directory=db_location,
+        embedding_function=embeddings
+    )
+
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+    data = text_splitter.split_documents(data)
+    vector_store.add_documents(data)
+    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
 chat_history = []
 
 # ── 3. Setup LLM ──────────────────────────────────────────────────
-model = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    api_key=groq_api_key,
-    temperature=0.2
-)
+model = None
+if groq_api_key:
+    model = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        api_key=groq_api_key,
+        temperature=0.2
+    )
 
 template = """
 Tu es un assistant de support client expert. Réponds en te basant sur le contexte fourni.
@@ -138,11 +168,12 @@ Tu es un assistant de support client expert. Réponds en te basant sur le contex
 ## Règles strictes :
 1. Si le contexte contient une analyse d'image → utilise-la EN PRIORITÉ pour répondre.
 2. Si la réponse se trouve dans le contexte → réponds de manière concise et claire.
-3. Si la réponse N'EST PAS dans le contexte → réponds EXACTEMENT : "Veuillez créer un ticket de support."
+3. Si la réponse N'EST PAS clairement dans le contexte → propose une aide générale utile et prudente (étapes de diagnostic simples, vérifications de base), sans inventer de faits spécifiques.
 4. Si la question est floue ET qu'il n'y a PAS d'image → demande une clarification.
 5. N'invente jamais d'information absente du contexte.
 6. Utilise l'historique pour les questions ambiguës.
 7. Réponds TOUJOURS dans la langue : {language}, ne jamais répondre dans une langue autre que : {language}
+8. Propose de créer un ticket de support uniquement si le problème nécessite une intervention technique interne, un accès au compte, ou si les étapes proposées n'ont pas résolu le problème.
 9. Ne jamais poser plusieurs questions à la fois.
 9. Ne jamais redemander une information déjà fournie dans l'historique.
 
@@ -169,10 +200,7 @@ def ask_support_bot(question: str, history=None, image_path: str = "") -> str:
     if image_path and os.path.exists(image_path):
         image_description = describe_image(image_path, question)
 
-    try:
-        lang = detect(question)
-    except LangDetectException:
-        lang = "fr"
+    lang = resolve_response_language(question)
 
     history_text = "\n".join(history)
 
@@ -185,8 +213,19 @@ def ask_support_bot(question: str, history=None, image_path: str = "") -> str:
     else:
         full_question = history_text + f"\nUser: {question}"
 
-    docs = retriever.invoke(full_question)
-    reviews_text = "\n".join([doc.page_content for doc in docs])
+    reviews_text = ""
+    if retriever is not None:
+        docs = retriever.invoke(full_question)
+        reviews_text = "\n".join([doc.page_content for doc in docs])
+    else:
+        reviews_text = (
+            "Contexte vectoriel local desactive. Donne d'abord une reponse pratique et utile, "
+            "avec des etapes de verification simples. Si la resolution exige une intervention humaine "
+            "ou si le probleme persiste apres ces etapes, recommande alors de creer un ticket."
+        )
+
+    if model is None:
+        return "GROQ_API_KEY manquant. Veuillez configurer la cle API du chatbot."
 
     if image_description:
         reviews_text = (
