@@ -174,6 +174,9 @@ export const takeMoney = (id, amount) =>
 export const updateClientBalance = (id, amount, operation = 'set') =>
     apiRequest('PATCH', `/admin/clients/${id}/balance`, { amount, operation });
 
+export const getInsufficientFundsTickets = () =>
+    apiRequest('GET', '/admin/tickets/insufficient-funds');
+
 // ── Employee Management ──────────────────────────────────────────────
 export const getEmployees = () =>
     apiRequest('GET', '/admin/employees');

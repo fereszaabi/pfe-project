@@ -147,6 +147,20 @@ class ClientController extends Controller
                 ? 'Warning: Client has insufficient funds. Admin approval required to proceed.' 
                 : null,
         ], 201);
+        // If the client is in debt, create a simple Log entry for admins
+        if ($hasInsufficientFunds) {
+            try {
+                \App\Models\Log::create([
+                    'demande_id' => $demande->id,
+                    'client_id' => $clientId,
+                    'description' => 'Client created a ticket with insufficient funds: balance ' . $client->money,
+                    'status' => 'insufficient_funds',
+                    'created_at_demande' => now(),
+                ]);
+            } catch (\Throwable $e) {
+                // swallow: logging failure should not affect client flow
+            }
+        }
     }
 
     /**

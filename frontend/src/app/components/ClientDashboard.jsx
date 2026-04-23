@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot } from '../../services/api';
+import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot, getClientProfile } from '../../services/api';
 
 export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, activeView }) {
     const promptedRatingTicketsRef = useRef(new Set());
@@ -12,7 +12,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         {
             id: 'welcome',
             role: 'assistant',
-            content: 'Hi! I am your quick support assistant. Tell me what issue you are facing and I will help you troubleshoot it.',
+            content: 'Hi! I am ID Soft AI Quick Support. Tell me what issue you are facing and I will help you troubleshoot it.',
         },
     ]);
     const [tickets, setTickets] = useState([]);
@@ -27,6 +27,10 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [ratingError, setRatingError] = useState('');
     const [isSubmittingRating, setIsSubmittingRating] = useState(false);
     const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
+    const [clientBalance, setClientBalance] = useState(Number(user?.money ?? 0));
+    const [showPayLaterConfirm, setShowPayLaterConfirm] = useState(false);
+    const [pendingPriority, setPendingPriority] = useState(null);
+    const [allowPayLaterSubmit, setAllowPayLaterSubmit] = useState(false);
     const [newTicket, setNewTicket] = useState({
         titre: '',
         description: '',
@@ -37,6 +41,27 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     });
 
     const priorityFees = { low: 10, medium: 20, high: 25, urgent: 30 };
+
+    const getSelectedPriorityCost = (priority) => Number(priorityFees[priority] ?? 0);
+
+    const hasInsufficientFundsForPriority = (priority) => {
+        const fee = getSelectedPriorityCost(priority);
+        return Number(clientBalance) < fee;
+    };
+
+    const handlePriorityChange = (priority) => {
+        if (!priority) return;
+
+        if (hasInsufficientFundsForPriority(priority)) {
+            setPendingPriority(priority);
+            setShowPayLaterConfirm(true);
+            return;
+        }
+
+        setAllowPayLaterSubmit(false);
+        setNewTicket((prev) => ({ ...prev, priority }));
+        setSubmitError('');
+    };
 
     useEffect(() => {
         let isMounted = true;
@@ -90,8 +115,15 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     useEffect(() => {
         if (showCreateTicket) {
             setLoadingMachines(true);
-            getMachines()
-                .then((data) => setMachines(data.machines ?? []))
+            Promise.all([getMachines(), getClientProfile().catch(() => null)])
+                .then(([machineData, profileData]) => {
+                    setMachines(machineData?.machines ?? []);
+
+                    const balance = Number(profileData?.profile?.money ?? profileData?.money ?? NaN);
+                    if (!Number.isNaN(balance)) {
+                        setClientBalance(balance);
+                    }
+                })
                 .catch(() => setMachines([]))
                 .finally(() => setLoadingMachines(false));
         }
@@ -147,6 +179,14 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const handleSubmit = async (e) => {
         e.preventDefault();
         setSubmitError('');
+
+        const selectedPriorityCost = getSelectedPriorityCost(newTicket.priority);
+        if (hasInsufficientFundsForPriority(newTicket.priority) && !allowPayLaterSubmit) {
+            setPendingPriority(newTicket.priority);
+            setShowPayLaterConfirm(true);
+            setSubmitError(`Insufficient funds for ${newTicket.priority} priority (${selectedPriorityCost} DT). Confirm pay later to continue.`);
+            return;
+        }
         
         // Validate machine selection
         if (!createNewMachine && !newTicket.machine_id) {
@@ -175,6 +215,13 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             setNewTicket({ titre: '', description: '', machine_id: '', code_anydesk: '', priority: 'low', image: null });
             setCreateNewMachine(false);
             setShowCreateTicket(false);
+            setAllowPayLaterSubmit(false);
+
+            const profileData = await getClientProfile().catch(() => null);
+            const refreshedBalance = Number(profileData?.profile?.money ?? profileData?.money ?? NaN);
+            if (!Number.isNaN(refreshedBalance)) {
+                setClientBalance(refreshedBalance);
+            }
         } catch (err) {
             if (err?.message === 'Unauthenticated.') {
                 setSubmitError('Session expired. Please sign in again.');
@@ -255,7 +302,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 },
             ]);
         } catch (err) {
-            const errorMessage = err?.message || 'Quick support is temporarily unavailable. Please try again later.';
+            const errorMessage = err?.message || 'ID Soft AI Quick Support is temporarily unavailable. Please try again later.';
             setSupportMessages((prev) => [
                 ...prev,
                 {
@@ -410,13 +457,13 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                             <div className="relative z-10 flex flex-col justify-between h-full">
                                 <div>
                                     <p className="text-white/80 text-sm font-medium">Need Help?</p>
-                                    <h3 className="text-2xl font-bold text-white mt-1">Quick Support</h3>
+                                    <h3 className="text-2xl font-bold text-white mt-1">ID Soft AI Quick Support</h3>
                                 </div>
                                 <button
                                     onClick={() => setShowSupportChat(true)}
                                     className="mt-4 w-full py-2 bg-white text-primary font-bold rounded-lg hover:bg-slate-50 transition-colors"
                                 >
-                                    Start Live Chat
+                                    Start AI Chat
                                 </button>
                             </div>
                         </div>
@@ -519,7 +566,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                         </label>
                                         <select
                                             value={newTicket.priority}
-                                            onChange={(e) => setNewTicket({ ...newTicket, priority: e.target.value })}
+                                            onChange={(e) => handlePriorityChange(e.target.value)}
                                             className="w-full px-4 py-3 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary focus:border-primary text-slate-900 dark:text-white"
                                         >
                                             <option value="low">Low — 10 DT</option>
@@ -563,6 +610,12 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                         )}
                                     </label>
                                 </div>
+
+                                {hasInsufficientFundsForPriority(newTicket.priority) && (
+                                    <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-sm text-amber-700 dark:text-amber-300">
+                                        Insufficient funds for this priority ({getSelectedPriorityCost(newTicket.priority)} DT). You can continue now and pay later after admin review.
+                                    </div>
+                                )}
 
                                 {/* Fee Summary */}
                                 <div className="flex items-center justify-between bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-lg px-5 py-4">
@@ -784,8 +837,8 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
                         <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
                             <div>
-                                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Quick Support Live Chat</h3>
-                                <p className="text-xs text-slate-500">Powered by support assistant</p>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-white">ID Soft AI Quick Support</h3>
+                                <p className="text-xs text-slate-500">Powered by ID Soft AI assistant</p>
                             </div>
                             <button onClick={() => setShowSupportChat(false)} className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors">
                                 <span className="material-symbols-outlined">close</span>
@@ -831,6 +884,49 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                 className="px-4 py-2.5 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 Send
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {showPayLaterConfirm && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowPayLaterConfirm(false)}>
+                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl max-w-md w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                        <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex items-center gap-3">
+                            <span className="material-symbols-outlined text-amber-500">warning</span>
+                            <h3 className="text-lg font-bold text-slate-900 dark:text-white">Insufficient Funds</h3>
+                        </div>
+                        <div className="p-5 space-y-3 text-sm text-slate-600 dark:text-slate-300">
+                            <p>
+                                This priority requires <strong>{getSelectedPriorityCost(pendingPriority || newTicket.priority)} DT</strong>,
+                                but your current balance is <strong>{Number(clientBalance).toFixed(3)} DT</strong>.
+                            </p>
+                            <p>Would you like to continue and pay later?</p>
+                        </div>
+                        <div className="px-5 pb-5 flex justify-end gap-3">
+                            <button
+                                onClick={() => {
+                                    setShowPayLaterConfirm(false);
+                                    setPendingPriority(null);
+                                    setAllowPayLaterSubmit(false);
+                                }}
+                                className="px-4 py-2 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                            >
+                                Choose Different Priority
+                            </button>
+                            <button
+                                onClick={() => {
+                                    const nextPriority = pendingPriority || newTicket.priority;
+                                    setNewTicket((prev) => ({ ...prev, priority: nextPriority }));
+                                    setAllowPayLaterSubmit(true);
+                                    setShowPayLaterConfirm(false);
+                                    setPendingPriority(null);
+                                    setSubmitError('You chose to continue with pay-later. Admin will be notified about your debt status.');
+                                }}
+                                className="px-4 py-2 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 transition-colors"
+                            >
+                                Continue & Pay Later
                             </button>
                         </div>
                     </div>
