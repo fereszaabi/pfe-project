@@ -349,6 +349,19 @@ class AdminUserController extends Controller
         }
     }
 
+        // Create an audit Log for the client so their UI can sync
+        try {
+            \App\Models\Log::create([
+                'demande_id' => $ticket->id,
+                'client_id' => $client->id,
+                'description' => 'Client charged ' . $validated['ticket_cost'] . ' TND. New balance: ' . $newBalance,
+                'status' => 'balance_change',
+                'created_at_demande' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // don't fail the main operation if log creation fails
+        }
+
     /**
      * Approve a ticket with insufficient funds and allow negative balance
      */
@@ -379,6 +392,19 @@ class AdminUserController extends Controller
             'payment_notes' => $validated['admin_notes'] ?? 'Admin approved despite insufficient funds',
             'admin_approved_override' => true,
         ]);
+
+        // Create an audit Log entry so client is notified of balance change
+        try {
+            \App\Models\Log::create([
+                'demande_id' => $ticket->id,
+                'client_id' => $client->id,
+                'description' => 'Admin approved ticket and charged ' . $validated['ticket_cost'] . ' TND. New balance: ' . $newBalance,
+                'status' => 'balance_change',
+                'created_at_demande' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // ignore logging failures
+        }
 
         return response()->json([
             'message' => 'Ticket approved. Balance may now be negative.',

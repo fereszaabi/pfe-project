@@ -267,3 +267,22 @@ class ClientController extends Controller
         return response()->json(['message' => 'Ticket deleted successfully']);
     }
 }
+    /**
+     * Get recent logs for authenticated client (used to sync balance changes)
+     */
+    public function getLogs(Request $request)
+    {
+        $user = $request->user();
+        $client = Client::where('cin', $user->cin)->first();
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
+
+        $logs = \App\Models\Log::where('client_id', $client->id)
+            ->orderBy('created_at', 'desc')
+            ->limit(50)
+            ->get();
+
+        return response()->json(['logs' => $logs]);
+    }

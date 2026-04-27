@@ -32,6 +32,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Client
     Route::apiResource('client/tickets', ClientController::class)
          ->only(['index', 'store', 'show', 'destroy']);
+    Route::get('client/logs', [ClientController::class, 'getLogs']);
     Route::post('client/tickets/{ticket}/rate', [ClientController::class, 'rate']);
     Route::get('client/machines', [ClientController::class, 'getMachines']);
     Route::get('client/profile', [ClientProfileController::class, 'getProfile']);
