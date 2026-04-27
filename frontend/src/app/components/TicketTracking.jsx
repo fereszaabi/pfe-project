@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { getClientTicket, deleteTicket, getTicketMessages, sendMessage } from '../../services/api';
+import { getClientTicket, deleteTicket, getTicketMessages, sendMessage, deleteTicketImage } from '../../services/api';
 
 export function TicketTracking({ ticketId, onBack }) {
     const [ticket, setTicket] = useState(null);
@@ -35,6 +35,28 @@ export function TicketTracking({ ticketId, onBack }) {
         }
 
         return false;
+    };
+
+    const BACKEND_BASE_URL = 'http://127.0.0.1:8000';
+
+    const resolveTicketImageUrl = (imagePath) => {
+        if (!imagePath || typeof imagePath !== 'string') return '';
+        if (/^https?:\/\//i.test(imagePath) || imagePath.startsWith('data:') || imagePath.startsWith('blob:')) return imagePath;
+        if (imagePath.startsWith('/')) return `${BACKEND_BASE_URL}${imagePath}`;
+        const normalized = imagePath.replace(/^storage\//, '');
+        return `${BACKEND_BASE_URL}/storage/${normalized}`;
+    };
+
+    const handleDeleteImage = async () => {
+        if (!ticket?.id) return;
+        if (!confirm('Delete attached image? This cannot be undone.')) return;
+        try {
+            await deleteTicketImage(ticket.id);
+            await loadTicket();
+        } catch (err) {
+            console.error('Failed to delete image:', err);
+            alert('Failed to delete image.');
+        }
     };
 
     useEffect(() => {
@@ -591,6 +613,18 @@ export function TicketTracking({ ticketId, onBack }) {
                                     </div>
                                 </div>
                             </div>
+
+                            {ticket.image && (
+                                <div>
+                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Attached Image</label>
+                                    <div className="flex items-start gap-3">
+                                        <img src={resolveTicketImageUrl(ticket.image)} alt="Attachment" className="rounded-lg max-h-48 w-full object-cover" />
+                                    </div>
+                                    <div className="mt-3">
+                                        <button onClick={handleDeleteImage} className="px-3 py-2 bg-red-600 text-white rounded-lg text-sm">Delete Image</button>
+                                    </div>
+                                </div>
+                            )}
                         </section>
 
                         {/* Activity Feed & Technician Notes */}

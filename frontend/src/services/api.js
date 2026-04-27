@@ -77,6 +77,12 @@ export const getClientProfile = () =>
 export const getClientLogs = () =>
     apiRequest('GET', '/client/logs');
 
+export const markClientLogRead = (logId) =>
+    apiRequest('PATCH', `/client/logs/${logId}/read`);
+
+export const deleteTicketImage = (ticketId) =>
+    apiRequest('DELETE', `/client/tickets/${ticketId}/image`);
+
 export const askSupportBot = (message, history = []) =>
     apiRequest('POST', '/client/support-bot', { message, history });
 

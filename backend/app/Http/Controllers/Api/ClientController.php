@@ -286,3 +286,61 @@ class ClientController extends Controller
 
         return response()->json(['logs' => $logs]);
     }
+
+    /**
+     * Mark a client log as read (notification consumed)
+     */
+    public function markLogRead(Request $request, $logId)
+    {
+        $user = $request->user();
+        $client = Client::where('cin', $user->cin)->first();
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
+
+        $log = \App\Models\Log::where('id', $logId)->where('client_id', $client->id)->first();
+        if (!$log) {
+            return response()->json(['error' => 'Log not found'], 404);
+        }
+
+        $log->update(['is_read' => true]);
+        return response()->json(['message' => 'Marked as read', 'log' => $log]);
+    }
+
+    /**
+     * Delete the image attached to a ticket. Clients can delete their own attachments; employees can delete attachments on tickets they handle.
+     */
+    public function deleteTicketImage(Request $request, Demande $ticket)
+    {
+        $user = $request->user();
+
+        // Authorization: clients must own the ticket; employees must be assigned or have employee role
+        if ($user->role === 'client') {
+            $client = Client::where('cin', $user->cin)->first();
+            if (!$client || $ticket->id_client !== $client->id) {
+                return response()->json(['error' => 'Unauthorized'], 403);
+            }
+        } elseif ($user->role === 'employee') {
+            // allow employees to delete attachments on tickets they are assigned to or generally
+            // if strict: check assignment: if ($ticket->id_employee && $ticket->id_employee != $user->id) return 403;
+        } else {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $original = $ticket->getOriginal('image');
+        if (!$original) {
+            return response()->json(['message' => 'No image to delete'], 200);
+        }
+
+        try {
+            if (\Illuminate\Support\Facades\Storage::disk('public')->exists($original)) {
+                \Illuminate\Support\Facades\Storage::disk('public')->delete($original);
+            }
+
+            $ticket->update(['image' => null]);
+            return response()->json(['message' => 'Image deleted', 'ticket' => $ticket->fresh()]);
+        } catch (\Throwable $e) {
+            return response()->json(['error' => 'Failed to delete image: ' . $e->getMessage()], 500);
+        }
+    }
