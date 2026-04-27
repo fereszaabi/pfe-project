@@ -4,6 +4,7 @@ import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, Cart
 import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmployeeTicket, sendMessage, startConversation, getEmployeeStats, getTicketMessages, getUnreadMessages } from '../../services/api';
 
 export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
+    const BACKEND_BASE_URL = 'http://127.0.0.1:8000';
     const [selectedTicket, setSelectedTicket] = useState(null);
     const [filterStatus, setFilterStatus] = useState('all');
     const [searchQuery, setSearchQuery] = useState('');
@@ -24,9 +25,27 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const [toast, setToast] = useState(null);
     const [actionLoading, setActionLoading] = useState({});
     const messagesEndRef = useRef(null);
+    const isFetchingMessagesRef = useRef(false);
 
     const isMessageFromCurrentEmployee = (msg) => {
         return msg?.sender_type === 'employee' || msg?.sender?.email === user?.email;
+    };
+
+    const resolveTicketImageUrl = (imagePath) => {
+        if (!imagePath || typeof imagePath !== 'string') {
+            return '';
+        }
+
+        if (/^https?:\/\//i.test(imagePath) || imagePath.startsWith('data:') || imagePath.startsWith('blob:')) {
+            return imagePath;
+        }
+
+        if (imagePath.startsWith('/')) {
+            return `${BACKEND_BASE_URL}${imagePath}`;
+        }
+
+        const normalizedPath = imagePath.replace(/^storage\//, '');
+        return `${BACKEND_BASE_URL}/storage/${normalizedPath}`;
     };
 
     const showToast = (type, message) => {
@@ -114,7 +133,10 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const fetchConversationMessages = async (ticket, options = {}) => {
         if (!ticket?.id) return;
         const { silent = false } = options;
-        
+
+        if (isFetchingMessagesRef.current) return;
+        isFetchingMessagesRef.current = true;
+
         if (!silent) {
             setLoadingMessages(true);
         }
@@ -129,6 +151,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                 setConversationMessages([]);
             }
         } finally {
+            isFetchingMessagesRef.current = false;
             if (!silent) {
                 setLoadingMessages(false);
             }
@@ -141,7 +164,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         fetchConversationMessages(selectedTicket);
         const intervalId = setInterval(() => {
             fetchConversationMessages(selectedTicket, { silent: true });
-        }, 2000);
+        }, 4000);
 
         return () => clearInterval(intervalId);
     }, [selectedTicket?.id]);
@@ -1014,7 +1037,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                 {selectedTicket.image && (
                                     <div>
                                         <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Attached Image</label>
-                                        <img src={selectedTicket.image} alt="Ticket attachment" className="rounded-lg max-h-48 w-full object-cover" />
+                                        <img src={resolveTicketImageUrl(selectedTicket.image)} alt="Ticket attachment" className="rounded-lg max-h-48 w-full object-cover" />
                                     </div>
                                 )}
 

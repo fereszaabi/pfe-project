@@ -39,7 +39,7 @@ export function TicketTracking({ ticketId, onBack }) {
 
     useEffect(() => {
         loadTicket();
-        const pollInterval = setInterval(checkForUpdates, 5000); // Poll every 5 seconds
+        const pollInterval = setInterval(checkForUpdates, 10000); // Poll every 10 seconds
         return () => clearInterval(pollInterval);
     }, [ticketId]);
 
@@ -51,12 +51,14 @@ export function TicketTracking({ ticketId, onBack }) {
         scrollToBottom();
     }, [conversationMessages]);
 
+    const isFetchingMessagesRef = useRef(false);
+
     useEffect(() => {
         if (!ticketId) return;
 
         const intervalId = setInterval(() => {
             fetchConversationMessages({ silent: true });
-        }, 2000);
+        }, 5000);
 
         return () => clearInterval(intervalId);
     }, [ticketId]);
@@ -67,6 +69,9 @@ export function TicketTracking({ ticketId, onBack }) {
             if (!silent) {
                 setLoadingMessages(true);
             }
+            if (isFetchingMessagesRef.current) return;
+            isFetchingMessagesRef.current = true;
+
             const data = await getTicketMessages(ticketId);
             const msgs = Array.isArray(data.messages) ? data.messages : [];
             setConversationMessages(msgs);
@@ -96,6 +101,7 @@ export function TicketTracking({ ticketId, onBack }) {
         } catch (err) {
             console.error('Failed to fetch messages:', err);
         } finally {
+            isFetchingMessagesRef.current = false;
             if (!silent) {
                 setLoadingMessages(false);
             }

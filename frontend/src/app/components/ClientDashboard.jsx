@@ -4,6 +4,7 @@ import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMes
 export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, activeView }) {
     const promptedRatingTicketsRef = useRef(new Set());
     const supportMessagesEndRef = useRef(null);
+    const isFetchingTicketsRef = useRef(false);
     const [showCreateTicket, setShowCreateTicket] = useState(false);
     const [showSupportChat, setShowSupportChat] = useState(false);
     const [supportInput, setSupportInput] = useState('');
@@ -67,6 +68,9 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         let isMounted = true;
 
         const fetchTickets = async (showLoader = false) => {
+            if (isFetchingTicketsRef.current) return;
+            isFetchingTicketsRef.current = true;
+
             if (showLoader) {
                 setLoadingTickets(true);
             }
@@ -80,6 +84,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     setTickets([]);
                 }
             } finally {
+                isFetchingTicketsRef.current = false;
                 if (showLoader && isMounted) {
                     setLoadingTickets(false);
                 }
@@ -87,7 +92,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         };
 
         fetchTickets(true);
-        const intervalId = setInterval(() => fetchTickets(false), 5000);
+        const intervalId = setInterval(() => fetchTickets(false), 10000);
 
         return () => {
             isMounted = false;
