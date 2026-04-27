@@ -321,18 +321,32 @@ class AdminUserController extends Controller
 
         $client = Client::find($ticket->id_client);
 
-        // Set the cost on the ticket
-        $ticket->update([
-            'ticket_cost' => $validated['ticket_cost'],
-            'total_cost' => $validated['ticket_cost'],
-            'payment_notes' => $validated['notes'] ?? $ticket->payment_notes,
-        ]);
+        // Apply cost and update client balance atomically
+        \DB::beginTransaction();
+        try {
+            // Deduct the cost from client (charge immediately)
+            $newBalance = $client->money - $validated['ticket_cost'];
+            $client->update(['money' => $newBalance]);
 
-        return response()->json([
-            'message' => 'Ticket cost set successfully',
-            'ticket' => $ticket->fresh()->load(['client', 'employee', 'machine']),
-            'client_balance' => $client->money,
-        ]);
+            // Set the cost on the ticket and mark payment pending
+            $ticket->update([
+                'ticket_cost' => $validated['ticket_cost'],
+                'total_cost' => $validated['ticket_cost'],
+                'payment_notes' => $validated['notes'] ?? $ticket->payment_notes,
+                'payment_status' => 'pending',
+            ]);
+
+            \DB::commit();
+
+            return response()->json([
+                'message' => 'Ticket cost set and client charged successfully',
+                'ticket' => $ticket->fresh()->load(['client', 'employee', 'machine']),
+                'client_balance' => $newBalance,
+            ]);
+        } catch (\Throwable $e) {
+            \DB::rollBack();
+            return response()->json(['error' => 'Failed to set cost and charge client: ' . $e->getMessage()], 500);
+        }
     }
 
     /**
