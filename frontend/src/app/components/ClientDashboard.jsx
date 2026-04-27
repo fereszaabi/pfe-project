@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot, getClientProfile } from '../../services/api';
+import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot, getClientProfile, getClientLogs } from '../../services/api';
 
 export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, activeView }) {
     const promptedRatingTicketsRef = useRef(new Set());
@@ -29,6 +29,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [isSubmittingRating, setIsSubmittingRating] = useState(false);
     const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
     const [clientBalance, setClientBalance] = useState(Number(user?.money ?? 0));
+    const lastLogIdRef = useRef(null);
     const [showPayLaterConfirm, setShowPayLaterConfirm] = useState(false);
     const [pendingPriority, setPendingPriority] = useState(null);
     const [allowPayLaterSubmit, setAllowPayLaterSubmit] = useState(false);
@@ -98,6 +99,39 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             isMounted = false;
             clearInterval(intervalId);
         };
+    }, []);
+
+    // Poll client logs to detect balance changes made by admin
+    useEffect(() => {
+        let isMounted = true;
+
+        const checkLogs = async () => {
+            try {
+                const data = await getClientLogs();
+                const logs = data?.logs ?? [];
+                if (!Array.isArray(logs) || logs.length === 0) return;
+
+                const latestBalanceLog = logs.find(l => l.status === 'balance_change');
+                if (!latestBalanceLog) return;
+
+                const latestId = latestBalanceLog.id;
+                if (lastLogIdRef.current && lastLogIdRef.current === latestId) return;
+
+                lastLogIdRef.current = latestId;
+
+                const profile = await getClientProfile().catch(() => null);
+                const balance = Number(profile?.profile?.money ?? profile?.money ?? NaN);
+                if (!Number.isNaN(balance) && isMounted) {
+                    setClientBalance(balance);
+                }
+            } catch (err) {
+                // ignore polling errors
+            }
+        };
+
+        checkLogs();
+        const id = setInterval(checkLogs, 8000);
+        return () => { isMounted = false; clearInterval(id); };
     }, []);
 
     useEffect(() => {

@@ -74,6 +74,9 @@ export const getClientMachines = () =>
 export const getClientProfile = () =>
     apiRequest('GET', '/client/profile');
 
+export const getClientLogs = () =>
+    apiRequest('GET', '/client/logs');
+
 export const askSupportBot = (message, history = []) =>
     apiRequest('POST', '/client/support-bot', { message, history });
 
