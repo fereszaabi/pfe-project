@@ -180,7 +180,7 @@ class ClientController extends Controller
                 if ($logs->isNotEmpty()) {
                     $lastSentId = $logs->last()->id;
                     echo "event: logs\n";
-                        $client = $this->resolveClient($user);
+                    echo 'data: ' . json_encode($logs) . "\n\n";
                 } else {
                     echo "event: ping\n";
                     echo 'data: ' . json_encode(['type' => 'ping', 'time' => now()->toISOString()]) . "\n\n";
@@ -247,7 +247,8 @@ class ClientController extends Controller
             'urgent' => 30,
         ];
         $priorityKey = strtolower((string) $request->priority);
-            $client = $this->resolveClient($user);
+        $requiredFee = $priorityFees[$priorityKey] ?? 10;
+        
         $hasInsufficientFunds = $client->money < $requiredFee;
         $paymentDeadline = now()->addWeek();
         $originalBalance = $client->money;
@@ -472,7 +473,7 @@ class ClientController extends Controller
                 'total_logs' => $logs->total(),
             ],
         ]);
-                $client = $this->resolveClient($user);
+    }
 
     /**
      * Mark a client log as read (notification consumed)
@@ -503,12 +504,12 @@ class ClientController extends Controller
      * Delete the image attached to a ticket. Clients can delete their own attachments; employees can delete attachments on tickets they handle.
      */
     public function deleteTicketImage(Request $request, Demande $ticket)
-        $client = $this->resolveClient($user);
+    {
         $user = $request->user();
+        $client = $this->resolveClient($user);
 
         // Authorization: clients must own the ticket; employees must be assigned or have employee role
         if ($user->role === 'client') {
-            $client = Client::where('cin', $user->cin)->first();
             if (!$client || $ticket->id_client !== $client->id) {
                 return response()->json(['error' => 'Unauthorized'], 403);
             }
@@ -528,7 +529,6 @@ class ClientController extends Controller
             if (\Illuminate\Support\Facades\Storage::disk('public')->exists($original)) {
                 \Illuminate\Support\Facades\Storage::disk('public')->delete($original);
             }
-                $client = $this->resolveClient($user);
             $ticket->update(['image' => null]);
             return response()->json(['message' => 'Image deleted', 'ticket' => $ticket->fresh()]);
         } catch (\Throwable $e) {
