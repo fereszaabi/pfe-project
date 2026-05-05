@@ -8,8 +8,11 @@ use App\Models\Admin;
 use App\Models\Employee;
 use App\Models\Demande;
 use App\Models\Client;
+use App\Events\TicketUpdated;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Cache;
 
 class AdminUserController extends Controller
 {
@@ -18,8 +21,47 @@ class AdminUserController extends Controller
      */
     public function index()
     {
-        $demandes = Demande::with(['client', 'employee'])->orderBy('created_at', 'desc')->get();
-        return response()->json($demandes);
+        $validated = request()->validate([
+            'per_page' => 'nullable|integer|min:1|max:100',
+            'search' => 'nullable|string|max:120',
+            'status' => 'nullable|string|max:50',
+        ]);
+
+        $perPage = (int) ($validated['per_page'] ?? 10);
+        $search = trim((string) ($validated['search'] ?? ''));
+        $status = $validated['status'] ?? null;
+
+        $query = Demande::with(['client', 'employee', 'machine'])
+            ->orderBy('created_at', 'desc');
+
+        if ($status) {
+            $query->where('status', $status);
+        }
+
+        if ($search !== '') {
+            $query->where(function ($nested) use ($search) {
+                $nested->where('titre', 'like', "%{$search}%")
+                    ->orWhere('description', 'like', "%{$search}%")
+                    ->orWhere('status', 'like', "%{$search}%")
+                    ->orWhereHas('client', function ($clientQuery) use ($search) {
+                        $clientQuery->where('nom', 'like', "%{$search}%")
+                            ->orWhere('prenom', 'like', "%{$search}%")
+                            ->orWhere('mail', 'like', "%{$search}%");
+                    });
+            });
+        }
+
+        $demandes = $query->paginate($perPage);
+
+        return response()->json([
+            'ok' => true,
+            'data' => $demandes->items(),
+            'pagination' => [
+                'current_page' => $demandes->currentPage(),
+                'total_pages' => $demandes->lastPage(),
+                'total_tickets' => $demandes->total(),
+            ],
+        ]);
     }
 
     /**
@@ -52,6 +94,22 @@ class AdminUserController extends Controller
                 'cin'      => $request->cin,
                 'password' => Hash::make($request->password),
             ]);
+        } elseif ($role == 'client') {
+            $nameParts = preg_split('/\s+/', trim((string) $request->name), 2);
+            $nom = $nameParts[0] ?? $request->name;
+            $prenom = $nameParts[1] ?? $nom;
+
+            Client::create([
+                'nom' => $nom,
+                'prenom' => $request->prenom ?? $prenom,
+                'mail' => $request->email,
+                'cin' => $request->cin,
+                'code_fiscal' => $request->code_fiscal,
+                'numero' => $request->numero ?? '00000000',
+                'password' => Hash::make($request->password),
+                'money' => 0,
+                'client_state' => 'active',
+            ]);
         }
 
         return response()->json($user, 201);
@@ -62,17 +120,24 @@ class AdminUserController extends Controller
      */
     public function show(Demande $demande)
     {
-        return $demande->load(['employee', 'client']);
+        return response()->json([
+            'ok' => true,
+            'demande' => $demande->load(['employee', 'client', 'machine']),
+        ]);
     }
 
     public function stats()
     {
-        return [
-            'total'     => Demande::count(),
-            'by_status' => Demande::groupBy('status')
-                ->selectRaw('status, count(*) as count')
-                ->pluck('count', 'status'),
-        ];
+        $payload = Cache::remember('admin:stats', now()->addSeconds(45), function () {
+            return [
+                'total'     => Demande::count(),
+                'by_status' => Demande::groupBy('status')
+                    ->selectRaw('status, count(*) as count')
+                    ->pluck('count', 'status'),
+            ];
+        });
+
+        return response()->json(['ok' => true] + $payload);
     }
 
     /**
@@ -86,11 +151,43 @@ class AdminUserController extends Controller
 
     public function update_statu(Request $request, Demande $demande)
     {
-        $demande->update([
-            'status' => $request->status,
+        $validated = $request->validate([
+            'status' => 'required|string|in:submitted,in progress,resolved,closed,escalated,tech',
         ]);
 
-        return response()->json($demande->fresh()->load('client'));
+        $normalizedStatus = $validated['status'] === 'tech' ? 'escalated' : $validated['status'];
+
+        $demande->update([
+            'status' => $normalizedStatus,
+        ]);
+
+        if (in_array($normalizedStatus, ['resolved', 'closed'], true) && !$demande->completed_at) {
+            $demande->update([
+                'completed_at' => Carbon::now(),
+            ]);
+
+            if ($demande->assigned_at) {
+                $hours = $demande->completed_at->diffInMinutes($demande->assigned_at) / 60;
+                $demande->update(['resolution_hours' => round($hours, 2)]);
+            }
+
+            if ($demande->id_employee) {
+                $employee = Employee::find($demande->id_employee);
+                if ($employee) {
+                    $employee->decrement('current_workload');
+                    $employee->update(['last_ticket_completed' => Carbon::now()]);
+                    $employee->recalculatePerformance();
+                }
+            }
+        }
+
+        $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
+        broadcast(new TicketUpdated($updatedTicket))->toOthers();
+
+        return response()->json([
+            'ok' => true,
+            'demande' => $updatedTicket,
+        ]);
     }
 
     /**
@@ -163,9 +260,37 @@ class AdminUserController extends Controller
      */
     public function getClients()
     {
-        $clients = Client::orderBy('created_at', 'desc')->get();
-        
-        return response()->json(['clients' => $clients]);
+        $validated = request()->validate([
+            'per_page' => 'nullable|integer|min:1|max:100',
+            'search' => 'nullable|string|max:120',
+        ]);
+
+        $perPage = (int) ($validated['per_page'] ?? 20);
+        $search = trim((string) ($validated['search'] ?? ''));
+
+        $query = Client::orderBy('created_at', 'desc');
+
+        if ($search !== '') {
+            $query->where(function ($nested) use ($search) {
+                $nested->where('nom', 'like', "%{$search}%")
+                    ->orWhere('prenom', 'like', "%{$search}%")
+                    ->orWhere('mail', 'like', "%{$search}%")
+                    ->orWhere('cin', 'like', "%{$search}%")
+                    ->orWhere('code_fiscal', 'like', "%{$search}%");
+            });
+        }
+
+        $clients = $query->paginate($perPage);
+
+        return response()->json([
+            'ok' => true,
+            'clients' => $clients->items(),
+            'pagination' => [
+                'current_page' => $clients->currentPage(),
+                'total_pages' => $clients->lastPage(),
+                'total_clients' => $clients->total(),
+            ],
+        ]);
     }
 
     /**
@@ -279,6 +404,128 @@ class AdminUserController extends Controller
     }
 
     /**
+     * Get detailed performance stats for a specific employee
+     */
+    public function getEmployeeStats($employeeId)
+    {
+        $employee = Employee::find($employeeId);
+
+        if (!$employee) {
+            return response()->json(['message' => 'Employee not found'], 404);
+        }
+
+        // Find matching User record for display name
+        $userRecord = \App\Models\User::where('cin', $employee->cin)
+            ->orWhere('email', $employee->mail)
+            ->first();
+
+        $fallbackName = trim(($employee->nom ?? '') . ' ' . ($employee->prenom ?? ''));
+
+        // All tickets assigned to this employee
+        $allTickets = Demande::where('id_employee', $employee->id)
+            ->with(['client', 'machine'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        $completedTickets = $allTickets->whereIn('status', ['resolved', 'closed']);
+        $activeTickets = $allTickets->whereNotIn('status', ['resolved', 'closed']);
+
+        $ticketsCompleted = $completedTickets->count();
+        $ticketsActive = $activeTickets->count();
+        $ticketsTotal = $allTickets->count();
+
+        // Average rating
+        $ratedTickets = $completedTickets->whereNotNull('client_rating');
+        $avgRating = $ratedTickets->count() > 0
+            ? round($ratedTickets->avg('client_rating'), 2)
+            : 0;
+
+        // Average resolution time
+        $resolvedWithTime = $completedTickets->whereNotNull('resolution_hours');
+        $avgResolutionHours = $resolvedWithTime->count() > 0
+            ? round($resolvedWithTime->avg('resolution_hours'), 2)
+            : 0;
+
+        // Rating distribution (1-5 stars)
+        $ratingDistribution = [];
+        for ($i = 1; $i <= 5; $i++) {
+            $ratingDistribution[$i] = $ratedTickets->where('client_rating', $i)->count();
+        }
+
+        // Status breakdown
+        $statusBreakdown = $allTickets->groupBy('status')->map->count();
+
+        // Priority breakdown
+        $priorityBreakdown = $allTickets->groupBy('priority')->map->count();
+
+        // Monthly trend (last 6 months)
+        $monthlyTrend = [];
+        for ($i = 5; $i >= 0; $i--) {
+            $month = now()->subMonths($i);
+            $monthKey = $month->format('Y-m');
+            $monthLabel = $month->format('M Y');
+
+            $monthTickets = $allTickets->filter(function ($t) use ($monthKey) {
+                return $t->created_at && $t->created_at->format('Y-m') === $monthKey;
+            });
+
+            $monthCompleted = $monthTickets->whereIn('status', ['resolved', 'closed']);
+
+            $monthlyTrend[] = [
+                'month' => $monthLabel,
+                'assigned' => $monthTickets->count(),
+                'completed' => $monthCompleted->count(),
+            ];
+        }
+
+        // Recent tickets (last 10)
+        $recentTickets = $allTickets->take(10)->map(function ($t) {
+            return [
+                'id' => $t->id,
+                'titre' => $t->titre,
+                'description' => $t->description ? substr($t->description, 0, 80) : null,
+                'status' => $t->status,
+                'priority' => $t->priority,
+                'client_name' => $t->client->nom ?? 'Unknown',
+                'client_rating' => $t->client_rating,
+                'resolution_hours' => $t->resolution_hours,
+                'created_at' => $t->created_at,
+                'completed_at' => $t->completed_at,
+            ];
+        })->values();
+
+        // Satisfaction rate (tickets rated >= 4)
+        $satisfactionRate = $ratedTickets->count() > 0
+            ? round($ratedTickets->where('client_rating', '>=', 4)->count() / $ratedTickets->count() * 100, 1)
+            : 0;
+
+        return response()->json([
+            'ok' => true,
+            'employee' => [
+                'id' => $employee->id,
+                'name' => $userRecord?->name ?? ($fallbackName !== '' ? $fallbackName : 'Employee #' . $employee->id),
+                'email' => $userRecord?->email ?? $employee->mail,
+                'cin' => $employee->cin,
+                'joined_at' => $employee->created_at,
+            ],
+            'stats' => [
+                'tickets_total' => $ticketsTotal,
+                'tickets_completed' => $ticketsCompleted,
+                'tickets_active' => $ticketsActive,
+                'avg_rating' => $avgRating,
+                'avg_resolution_hours' => $avgResolutionHours,
+                'satisfaction_rate' => $satisfactionRate,
+                'total_ratings' => $ratedTickets->count(),
+            ],
+            'rating_distribution' => $ratingDistribution,
+            'status_breakdown' => $statusBreakdown,
+            'priority_breakdown' => $priorityBreakdown,
+            'monthly_trend' => $monthlyTrend,
+            'recent_tickets' => $recentTickets,
+        ]);
+    }
+
+    /**
      * Get all tickets with insufficient funds that need admin approval
      */
     public function getInsufficientFundsTickets()
@@ -298,6 +545,7 @@ class AdminUserController extends Controller
         ];
 
         return response()->json([
+            'ok' => true,
             'tickets' => $tickets,
             'summary' => $summary,
         ]);
@@ -338,6 +586,19 @@ class AdminUserController extends Controller
 
             \DB::commit();
 
+            // Create an audit Log for the client so their UI can sync
+            try {
+                \App\Models\Log::create([
+                    'demande_id' => $ticket->id,
+                    'client_id' => $client->id,
+                    'description' => 'Client charged ' . $validated['ticket_cost'] . ' TND. New balance: ' . $newBalance,
+                    'status' => 'balance_change',
+                    'created_at_demande' => now(),
+                ]);
+            } catch (\Throwable $e) {
+                // don't fail the main operation if log creation fails
+            }
+
             return response()->json([
                 'message' => 'Ticket cost set and client charged successfully',
                 'ticket' => $ticket->fresh()->load(['client', 'employee', 'machine']),
@@ -348,19 +609,6 @@ class AdminUserController extends Controller
             return response()->json(['error' => 'Failed to set cost and charge client: ' . $e->getMessage()], 500);
         }
     }
-
-        // Create an audit Log for the client so their UI can sync
-        try {
-            \App\Models\Log::create([
-                'demande_id' => $ticket->id,
-                'client_id' => $client->id,
-                'description' => 'Client charged ' . $validated['ticket_cost'] . ' TND. New balance: ' . $newBalance,
-                'status' => 'balance_change',
-                'created_at_demande' => now(),
-            ]);
-        } catch (\Throwable $e) {
-            // don't fail the main operation if log creation fails
-        }
 
     /**
      * Approve a ticket with insufficient funds and allow negative balance

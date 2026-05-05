@@ -413,7 +413,13 @@ export function Escalated({ user, onLogout, onNavigate, activeView }) {
                                     : 'These are technical-category tickets that require a physical onsite visit from a field technician.'}
                             </div>
 
-                            {displayed.length === 0 ? (
+                            {loading ? (
+                                <div className="p-10 space-y-4">
+                                    {[...Array(4)].map((_, idx) => (
+                                        <div key={`escalated-skeleton-${idx}`} className="h-12 bg-slate-100 dark:bg-[#3a2f27] rounded-lg animate-pulse"></div>
+                                    ))}
+                                </div>
+                            ) : displayed.length === 0 ? (
                                 <div className="flex flex-col items-center justify-center py-20 text-center gap-4">
                                     <div className="size-16 rounded-full bg-slate-100 dark:bg-[#3a2f27] flex items-center justify-center">
                                         <span className="material-symbols-outlined text-3xl text-[#bba99b]">

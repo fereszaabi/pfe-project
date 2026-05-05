@@ -38,6 +38,16 @@ async function apiUpload(method, path, formData) {
     return data;
 }
 
+function buildQuery(params = {}) {
+    const searchParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+        if (value === undefined || value === null || value === '') return;
+        searchParams.append(key, value);
+    });
+    const query = searchParams.toString();
+    return query ? `?${query}` : '';
+}
+
 // ── Auth ────────────────────────────────────────────────────────────
 export const login = (identifier, password) =>
     apiRequest('POST', '/login', { identifier, password });
@@ -52,8 +62,8 @@ export const getMe = () =>
     apiRequest('GET', '/user');
 
 // ── Client ───────────────────────────────────────────────────────────
-export const getClientTickets = () =>
-    apiRequest('GET', '/client/tickets');
+export const getClientTickets = (params) =>
+    apiRequest('GET', `/client/tickets${buildQuery(params)}`);
 
 export const getClientTicket = (id) =>
     apiRequest('GET', `/client/tickets/${id}`);
@@ -74,8 +84,11 @@ export const getClientMachines = () =>
 export const getClientProfile = () =>
     apiRequest('GET', '/client/profile');
 
-export const getClientLogs = () =>
-    apiRequest('GET', '/client/logs');
+export const getClientLogs = (params) =>
+    apiRequest('GET', `/client/logs${buildQuery(params)}`);
+
+export const getClientLogsStreamUrl = () =>
+    `${BASE}/client/logs/stream`;
 
 export const markClientLogRead = (logId) =>
     apiRequest('PATCH', `/client/logs/${logId}/read`);
@@ -85,6 +98,18 @@ export const deleteTicketImage = (ticketId) =>
 
 export const askSupportBot = (message, history = []) =>
     apiRequest('POST', '/client/support-bot', { message, history });
+
+export const getSupportBotHistory = () =>
+    apiRequest('GET', '/client/support-bot/history');
+
+export const getSupportBotSession = (sessionId) =>
+    apiRequest('GET', `/client/support-bot/history/${sessionId}`);
+
+export const saveSupportBotHistory = (title, messages) =>
+    apiRequest('POST', '/client/support-bot/history', { title, messages });
+
+export const getHelpArticles = (params) =>
+    apiRequest('GET', `/client/help/articles${buildQuery(params)}`);
 
 export const createMachine = (data) =>
     apiRequest('POST', '/client/machines', data);
@@ -96,8 +121,8 @@ export const deleteMachine = (id) =>
     apiRequest('DELETE', `/client/machines/${id}`);
 
 // ── Employee ─────────────────────────────────────────────────────────
-export const getEmployeeTickets = () =>
-    apiRequest('GET', '/employee/tickets');
+export const getEmployeeTickets = (params) =>
+    apiRequest('GET', `/employee/tickets${buildQuery(params)}`);
 
 export const assignTicket = (id) =>
     apiRequest('POST', `/employee/tickets/${id}/claim`);
@@ -153,8 +178,8 @@ export const rateEmployee = (ticketId, rating, ratingComment = '') =>
     });
 
 // ── Admin ────────────────────────────────────────────────────────────
-export const getAdminDemandes = () =>
-    apiRequest('GET', '/admin/demandes');
+export const getAdminDemandes = (params) =>
+    apiRequest('GET', `/admin/demandes${buildQuery(params)}`);
 
 export const getAdminTicketDetail = (id) =>
     apiRequest('GET', `/admin/demandes/${id}`);
@@ -162,8 +187,8 @@ export const getAdminTicketDetail = (id) =>
 export const getAdminStats = () =>
     apiRequest('GET', '/admin/stats');
 
-export const getAdminClients = () =>
-    apiRequest('GET', '/admin/clients');
+export const getAdminClients = (params) =>
+    apiRequest('GET', `/admin/clients${buildQuery(params)}`);
 
 export const createAdminUser = (data) =>
     apiRequest('POST', '/admin/users', data);
@@ -198,3 +223,47 @@ export const updateEmployee = (id, data) =>
 
 export const deleteEmployee = (id) =>
     apiRequest('DELETE', `/admin/employees/${id}`);
+
+export const getEmployeePerformance = (employeeId) =>
+    apiRequest('GET', `/admin/employees/${employeeId}/stats`);
+
+// ── Analytics & Reporting ───────────────────────────────────────────
+export const getKpiMetrics = (startDate, endDate) =>
+    apiRequest('GET', `/analytics/kpis${buildQuery({ start_date: startDate, end_date: endDate })}`);
+
+export const getTrendData = (metric, startDate, endDate) =>
+    apiRequest('GET', `/analytics/trends${buildQuery({ metric, start_date: startDate, end_date: endDate })}`);
+
+export const getAgentWorkload = (startDate, endDate) =>
+    apiRequest('GET', `/analytics/agent-workload${buildQuery({ start_date: startDate, end_date: endDate })}`);
+
+export const getBacklogDetails = (startDate, endDate, priority = null) =>
+    apiRequest('GET', `/analytics/backlog${buildQuery({ start_date: startDate, end_date: endDate, priority })}`);
+
+export const exportReport = (reportType, format, startDate, endDate) =>
+    apiRequest('POST', '/analytics/export', { report_type: reportType, format, start_date: startDate, end_date: endDate });
+
+// ── Multi-Channel Communication ──────────────────────────────────────
+export const getAvailableChannels = () =>
+    apiRequest('GET', '/channels');
+
+export const getClientChannels = () =>
+    apiRequest('GET', '/channels/my');
+
+export const addChannelAddress = (channel, address) =>
+    apiRequest('POST', '/channels/add', { channel, address });
+
+export const verifyChannelAddress = (addressId, code) =>
+    apiRequest('POST', `/channels/${addressId}/verify`, { code });
+
+export const removeChannelAddress = (addressId) =>
+    apiRequest('DELETE', `/channels/${addressId}`);
+
+export const getAdminChannels = () =>
+    apiRequest('GET', '/channels/admin/list');
+
+export const getWebhookStatus = () =>
+    apiRequest('GET', '/webhooks/status');
+
+export const retryFailedWebhooks = () =>
+    apiRequest('POST', '/webhooks/retry');

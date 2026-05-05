@@ -7,6 +7,7 @@ import { EmployeeDashboard } from './components/EmployeeDashboard';
 import { Escalated } from './components/Escalated';
 import { AdminDashboard } from './components/AdminDashboard';
 import { AdminEmployeeSettings } from './components/AdminEmployeeSettings';
+import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { TicketTracking } from './components/TicketTracking';
 import * as api from '../services/api';
 
@@ -242,6 +243,38 @@ export default function App() {
                 ticketId={selectedTicketId}
                 onBack={() => window.history.back()}
             />
+        );
+    }
+
+    if (view === 'analytics' && currentUser?.role === 'admin') {
+        return (
+            <AnalyticsDashboard
+                user={currentUser}
+                onLogout={handleLogout}
+                onNavigate={handleNavigate}
+            />
+        );
+    }
+
+    // Fallback debug view if we reach this point unexpectedly
+    if (currentUser) {
+        return (
+            <div className="min-h-screen flex items-center justify-center p-4 bg-slate-50 dark:bg-slate-900">
+                <div className="max-w-md w-full bg-white dark:bg-slate-800 rounded-lg shadow-lg p-8">
+                    <h2 className="text-xl font-bold text-slate-900 dark:text-white mb-4">Debug Info</h2>
+                    <div className="space-y-2 text-sm text-slate-600 dark:text-slate-400">
+                        <p><strong>View:</strong> {view}</p>
+                        <p><strong>Role:</strong> {currentUser.role || 'MISSING'}</p>
+                        <p><strong>ID:</strong> {currentUser.id || 'MISSING'}</p>
+                        <button
+                            onClick={handleLogout}
+                            className="mt-4 w-full px-4 py-2 bg-red-500 text-white rounded-lg font-semibold hover:bg-red-600 transition-colors"
+                        >
+                            Logout & Try Again
+                        </button>
+                    </div>
+                </div>
+            </div>
         );
     }
 

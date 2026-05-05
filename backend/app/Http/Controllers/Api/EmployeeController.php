@@ -7,6 +7,8 @@ use Illuminate\Http\Request;
 use App\Models\Demande;
 use App\Models\User;
 use Carbon\Carbon;
+use App\Events\TicketUpdated;
+use Illuminate\Support\Facades\Cache;
 
 class EmployeeController extends Controller
 {
@@ -37,6 +39,15 @@ class EmployeeController extends Controller
     public function index(Request $request)
     {
         $user = $request->user();
+        $validated = $request->validate([
+            'per_page' => 'nullable|integer|min:1|max:100',
+            'search' => 'nullable|string|max:120',
+            'status' => 'nullable|string|max:50',
+        ]);
+
+        $perPage = (int) ($validated['per_page'] ?? 10);
+        $search = trim((string) ($validated['search'] ?? ''));
+        $status = $validated['status'] ?? null;
         
         // Get the employee ID from the current user
         $employeeId = null;
@@ -53,30 +64,87 @@ class EmployeeController extends Controller
         }
 
         // Get all tickets with employee and client info
-        $allDemandes = Demande::with(['client', 'employee', 'machine'])
-            ->orderBy('created_at', 'desc')
-            ->paginate(15);
+        $allDemandesQuery = Demande::with(['client', 'employee', 'machine'])
+            ->orderBy('created_at', 'desc');
+
+        if ($status) {
+            $allDemandesQuery->where('status', $status);
+        }
+
+        if ($search !== '') {
+            $allDemandesQuery->where(function ($query) use ($search) {
+                $query->where('titre', 'like', "%{$search}%")
+                    ->orWhere('description', 'like', "%{$search}%")
+                    ->orWhere('status', 'like', "%{$search}%")
+                    ->orWhereHas('client', function ($clientQuery) use ($search) {
+                        $clientQuery->where('nom', 'like', "%{$search}%")
+                            ->orWhere('prenom', 'like', "%{$search}%")
+                            ->orWhere('mail', 'like', "%{$search}%");
+                    });
+            });
+        }
+
+        $allDemandes = $allDemandesQuery->paginate($perPage);
 
         // Get employee's assigned tickets - use the correct employee ID
-        $myDemandes = $employeeId 
+        $myDemandes = $employeeId
             ? Demande::where('id_employee', $employeeId)
                 ->whereNotNull('assigned_at')
                 ->with(['client', 'employee', 'machine'])
+                ->when($status, fn ($query) => $query->where('status', $status))
+                ->when($search !== '', function ($query) use ($search) {
+                    $query->where(function ($nested) use ($search) {
+                        $nested->where('titre', 'like', "%{$search}%")
+                            ->orWhere('description', 'like', "%{$search}%")
+                            ->orWhere('status', 'like', "%{$search}%")
+                            ->orWhereHas('client', function ($clientQuery) use ($search) {
+                                $clientQuery->where('nom', 'like', "%{$search}%")
+                                    ->orWhere('prenom', 'like', "%{$search}%")
+                                    ->orWhere('mail', 'like', "%{$search}%");
+                            });
+                    });
+                })
                 ->orderBy('assigned_at', 'desc')
-                ->paginate(10)
+                ->paginate($perPage)
             : [];
 
         // Get unassigned tickets for quick claiming
         $unassignedDemandes = Demande::whereNull('id_employee')
             ->with(['client', 'machine'])
+            ->when($status, fn ($query) => $query->where('status', $status))
+            ->when($search !== '', function ($query) use ($search) {
+                $query->where(function ($nested) use ($search) {
+                    $nested->where('titre', 'like', "%{$search}%")
+                        ->orWhere('description', 'like', "%{$search}%")
+                        ->orWhere('status', 'like', "%{$search}%")
+                        ->orWhereHas('client', function ($clientQuery) use ($search) {
+                            $clientQuery->where('nom', 'like', "%{$search}%")
+                                ->orWhere('prenom', 'like', "%{$search}%")
+                                ->orWhere('mail', 'like', "%{$search}%");
+                        });
+                });
+            })
             ->orderBy('created_at', 'desc')
-            ->paginate(10);
+            ->paginate($perPage);
 
         // Get all claimed tickets (assigned to any employee)
         $claimedDemandes = Demande::whereNotNull('id_employee')
             ->with(['client', 'employee', 'machine'])
+            ->when($status, fn ($query) => $query->where('status', $status))
+            ->when($search !== '', function ($query) use ($search) {
+                $query->where(function ($nested) use ($search) {
+                    $nested->where('titre', 'like', "%{$search}%")
+                        ->orWhere('description', 'like', "%{$search}%")
+                        ->orWhere('status', 'like', "%{$search}%")
+                        ->orWhereHas('client', function ($clientQuery) use ($search) {
+                            $clientQuery->where('nom', 'like', "%{$search}%")
+                                ->orWhere('prenom', 'like', "%{$search}%")
+                                ->orWhere('mail', 'like', "%{$search}%");
+                        });
+                });
+            })
             ->orderBy('assigned_at', 'desc')
-            ->paginate(15);
+            ->paginate($perPage);
 
         return response()->json([
             'all_tickets' => $allDemandes,
@@ -215,7 +283,7 @@ class EmployeeController extends Controller
             $employee->decrement('current_workload');
         }
 
-        return response()->json($demande->fresh()->load(['client', 'machine']));
+        return response()->json($demande->fresh()->load(['client', 'employee', 'machine']));
     }
 
     /**
@@ -230,18 +298,27 @@ class EmployeeController extends Controller
 
         $normalizedStatus = $request->status === 'tech' ? 'escalated' : $request->status;
 
-        $currentUserId = $request->user()->id;
+        $employee = $request->user() instanceof \App\Models\Employee
+            ? $request->user()
+            : \App\Models\Employee::where('cin', $request->user()->cin ?? null)
+                ->orWhere('mail', $request->user()->email ?? null)
+                ->first();
+
+        if (!$employee) {
+            return response()->json([
+                'message' => 'Employee record not found for current user',
+            ], 404);
+        }
 
         // If ticket is currently unassigned and employee wants to update status,
         // automatically assign it to them
         if ($demande->id_employee === null && in_array($normalizedStatus, ['in progress', 'resolved', 'closed'])) {
             $demande->update([
-                'id_employee' => $currentUserId,
+                'id_employee' => $employee->id,
                 'assigned_at' => Carbon::now(),
             ]);
             
             // Update employee workload
-            $employee = User::find($currentUserId);
             $employee->increment('current_workload');
         }
 
@@ -264,16 +341,19 @@ class EmployeeController extends Controller
 
             // Update the assigned employee's performance
             if ($demande->id_employee) {
-                $employee = User::find($demande->id_employee);
-                if ($employee) {
-                    $employee->decrement('current_workload');
-                    $employee->update(['last_ticket_completed' => Carbon::now()]);
-                    $employee->recalculatePerformance();
+                $assignedEmployee = \App\Models\Employee::find($demande->id_employee);
+                if ($assignedEmployee) {
+                    $assignedEmployee->decrement('current_workload');
+                    $assignedEmployee->update(['last_ticket_completed' => Carbon::now()]);
+                    $assignedEmployee->recalculatePerformance();
                 }
             }
         }
 
-        return response()->json($demande->fresh()->load(['client', 'employee', 'machine']));
+        $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
+        broadcast(new TicketUpdated($updatedTicket))->toOthers();
+
+        return response()->json($updatedTicket);
     }
 
     /**
@@ -316,7 +396,10 @@ class EmployeeController extends Controller
      */
     public function show(Request $request, Demande $demande)
     {
-        return response()->json($demande->load(['client', 'employee', 'machine']));
+        return response()->json([
+            'ok' => true,
+            'demande' => $demande->load(['client', 'employee', 'machine']),
+        ]);
     }
 
     /**
@@ -326,49 +409,10 @@ class EmployeeController extends Controller
     {
         $user = $request->user();
         $employeeActorId = $this->resolveEmployeeActorId($user);
+        $cacheKey = 'employee:stats:' . $employeeActorId;
 
-        $completedQuery = Demande::where('id_employee', $employeeActorId)
-            ->whereIn('status', ['resolved', 'closed']);
-
-        $ticketsCompleted = (clone $completedQuery)->count();
-        $avgRating = (float) ((clone $completedQuery)
-            ->whereNotNull('client_rating')
-            ->avg('client_rating') ?? 0);
-        $avgResolutionHours = (float) ((clone $completedQuery)
-            ->whereNotNull('resolution_hours')
-            ->avg('resolution_hours') ?? 0);
-
-        $currentWorkload = Demande::where('id_employee', $employeeActorId)
-            ->whereNotIn('status', ['resolved', 'closed'])
-            ->count();
-
-        $lastTicketCompleted = (clone $completedQuery)->max('completed_at');
-
-        return response()->json([
-            'id' => $user->id,
-            'name' => $user->name,
-            'email' => $user->email,
-            'tickets_completed' => (int) $ticketsCompleted,
-            'avg_rating' => round($avgRating, 2),
-            'avg_resolution_hours' => round($avgResolutionHours, 2),
-            'current_workload' => (int) $currentWorkload,
-            'total_earnings' => 0,
-            'performance_status' => 'active',
-            'last_ticket_completed' => $lastTicketCompleted,
-        ]);
-    }
-
-    /**
-     * Get leaderboard of top performers
-     */
-    public function leaderboard(Request $request)
-    {
-        $limit = max(1, (int) $request->get('limit', 10));
-
-        $employees = \App\Models\Employee::all();
-
-        $leaderboard = $employees->map(function ($employee) {
-            $completedQuery = Demande::where('id_employee', $employee->id)
+        $payload = Cache::remember($cacheKey, now()->addSeconds(45), function () use ($employeeActorId, $user) {
+            $completedQuery = Demande::where('id_employee', $employeeActorId)
                 ->whereIn('status', ['resolved', 'closed']);
 
             $ticketsCompleted = (clone $completedQuery)->count();
@@ -378,38 +422,92 @@ class EmployeeController extends Controller
             $avgResolutionHours = (float) ((clone $completedQuery)
                 ->whereNotNull('resolution_hours')
                 ->avg('resolution_hours') ?? 0);
-            $currentWorkload = Demande::where('id_employee', $employee->id)
+
+            $currentWorkload = Demande::where('id_employee', $employeeActorId)
                 ->whereNotIn('status', ['resolved', 'closed'])
                 ->count();
 
-            $userRecord = User::where('cin', $employee->cin)
-                ->orWhere('email', $employee->mail)
-                ->first();
-
-            $fallbackName = trim(($employee->nom ?? '') . ' ' . ($employee->prenom ?? ''));
+            $lastTicketCompleted = (clone $completedQuery)->max('completed_at');
 
             return [
-                'id' => $userRecord?->id ?? $employee->id,
-                'name' => $userRecord?->name ?? ($fallbackName !== '' ? $fallbackName : 'Employee #' . $employee->id),
-                'email' => $userRecord?->email ?? $employee->mail,
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
                 'tickets_completed' => (int) $ticketsCompleted,
                 'avg_rating' => round($avgRating, 2),
                 'avg_resolution_hours' => round($avgResolutionHours, 2),
                 'current_workload' => (int) $currentWorkload,
-                'total_earnings' => (float) ($userRecord?->total_earnings ?? 0),
+                'total_earnings' => 0,
+                'performance_status' => 'active',
+                'last_ticket_completed' => $lastTicketCompleted,
             ];
-        })
-            ->sort(function ($a, $b) {
-                if ($a['avg_rating'] === $b['avg_rating']) {
-                    return $b['tickets_completed'] <=> $a['tickets_completed'];
-                }
+        });
 
-                return $b['avg_rating'] <=> $a['avg_rating'];
+        return response()->json(['ok' => true] + $payload);
+    }
+
+    /**
+     * Get leaderboard of top performers
+     */
+    public function leaderboard(Request $request)
+    {
+        $validated = $request->validate([
+            'limit' => 'nullable|integer|min:1|max:50',
+        ]);
+
+        $limit = (int) ($validated['limit'] ?? 10);
+        $cacheKey = 'employee:leaderboard:' . $limit;
+
+        $leaderboard = Cache::remember($cacheKey, now()->addSeconds(45), function () use ($limit) {
+            $employees = \App\Models\Employee::all();
+
+            return $employees->map(function ($employee) {
+                $completedQuery = Demande::where('id_employee', $employee->id)
+                    ->whereIn('status', ['resolved', 'closed']);
+
+                $ticketsCompleted = (clone $completedQuery)->count();
+                $avgRating = (float) ((clone $completedQuery)
+                    ->whereNotNull('client_rating')
+                    ->avg('client_rating') ?? 0);
+                $avgResolutionHours = (float) ((clone $completedQuery)
+                    ->whereNotNull('resolution_hours')
+                    ->avg('resolution_hours') ?? 0);
+                $currentWorkload = Demande::where('id_employee', $employee->id)
+                    ->whereNotIn('status', ['resolved', 'closed'])
+                    ->count();
+
+                $userRecord = User::where('cin', $employee->cin)
+                    ->orWhere('email', $employee->mail)
+                    ->first();
+
+                $fallbackName = trim(($employee->nom ?? '') . ' ' . ($employee->prenom ?? ''));
+
+                return [
+                    'id' => $userRecord?->id ?? $employee->id,
+                    'name' => $userRecord?->name ?? ($fallbackName !== '' ? $fallbackName : 'Employee #' . $employee->id),
+                    'email' => $userRecord?->email ?? $employee->mail,
+                    'tickets_completed' => (int) $ticketsCompleted,
+                    'avg_rating' => round($avgRating, 2),
+                    'avg_resolution_hours' => round($avgResolutionHours, 2),
+                    'current_workload' => (int) $currentWorkload,
+                    'total_earnings' => (float) ($userRecord?->total_earnings ?? 0),
+                ];
             })
-            ->take($limit)
-            ->values();
+                ->sort(function ($a, $b) {
+                    if ($a['avg_rating'] === $b['avg_rating']) {
+                        return $b['tickets_completed'] <=> $a['tickets_completed'];
+                    }
 
-        return response()->json(['leaderboard' => $leaderboard]);
+                    return $b['avg_rating'] <=> $a['avg_rating'];
+                })
+                ->take($limit)
+                ->values();
+        });
+
+        return response()->json([
+            'ok' => true,
+            'leaderboard' => $leaderboard,
+        ]);
     }
 
     /**

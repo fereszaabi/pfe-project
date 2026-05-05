@@ -1,23 +1,40 @@
-import { useState, useEffect, useRef } from 'react';
-import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot, getClientProfile, getClientLogs, markClientLogRead, deleteTicketImage } from '../../services/api';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot, getClientProfile, getClientLogs, getClientLogsStreamUrl, markClientLogRead, deleteTicketImage, getSupportBotHistory, saveSupportBotHistory, getHelpArticles } from '../../services/api';
+import { getStatusBadgeClasses, getPriorityBadgeClasses } from '../utils/ticketStyles';
+import { getEcho } from '../../services/realtime';
 
 export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, activeView }) {
     const promptedRatingTicketsRef = useRef(new Set());
     const supportMessagesEndRef = useRef(null);
     const isFetchingTicketsRef = useRef(false);
+    const botRequestAbortRef = useRef(null); // For cancelling pending bot requests
+    const botTimeoutIdRef = useRef(null); // For tracking request timeout
+    const supportWelcomeMessage = {
+        id: 'welcome',
+        role: 'assistant',
+        content: 'Hi! I am ID Soft AI Quick Support. Tell me what issue you are facing and I will help you troubleshoot it.',
+    };
     const [showCreateTicket, setShowCreateTicket] = useState(false);
     const [showSupportChat, setShowSupportChat] = useState(false);
+    const [supportTab, setSupportTab] = useState('chat');
+    const [supportHistory, setSupportHistory] = useState([]);
+    const [activeHistoryId, setActiveHistoryId] = useState(null);
+    const [helpSearch, setHelpSearch] = useState('');
+    const [helpCategory, setHelpCategory] = useState('all');
+    const [helpArticles, setHelpArticles] = useState([]);
+    const [helpCategories, setHelpCategories] = useState([]);
+    const [helpLoading, setHelpLoading] = useState(false);
+    const [helpError, setHelpError] = useState('');
     const [supportInput, setSupportInput] = useState('');
     const [isBotReplying, setIsBotReplying] = useState(false);
     const [supportMessages, setSupportMessages] = useState([
-        {
-            id: 'welcome',
-            role: 'assistant',
-            content: 'Hi! I am ID Soft AI Quick Support. Tell me what issue you are facing and I will help you troubleshoot it.',
-        },
+        supportWelcomeMessage,
     ]);
     const [tickets, setTickets] = useState([]);
     const [loadingTickets, setLoadingTickets] = useState(true);
+    const [ticketSearch, setTicketSearch] = useState('');
+    const [ticketPage, setTicketPage] = useState(1);
+    const [ticketTotalPages, setTicketTotalPages] = useState(1);
     const [machines, setMachines] = useState([]);
     const [loadingMachines, setLoadingMachines] = useState(false);
     const [createNewMachine, setCreateNewMachine] = useState(false);
@@ -33,9 +50,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [notifications, setNotifications] = useState([]);
     const [unreadCount, setUnreadCount] = useState(0);
     const [showNotifications, setShowNotifications] = useState(false);
-    const [showPayLaterConfirm, setShowPayLaterConfirm] = useState(false);
-    const [pendingPriority, setPendingPriority] = useState(null);
-    const [allowPayLaterSubmit, setAllowPayLaterSubmit] = useState(false);
+    const [clientActorId, setClientActorId] = useState(null);
     const [newTicket, setNewTicket] = useState({
         titre: '',
         description: '',
@@ -56,17 +71,26 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
     const handlePriorityChange = (priority) => {
         if (!priority) return;
-
-        if (hasInsufficientFundsForPriority(priority)) {
-            setPendingPriority(priority);
-            setShowPayLaterConfirm(true);
-            return;
-        }
-
-        setAllowPayLaterSubmit(false);
         setNewTicket((prev) => ({ ...prev, priority }));
         setSubmitError('');
     };
+
+    useEffect(() => {
+        let isMounted = true;
+
+        getClientProfile()
+            .then((profileData) => {
+                const actorId = profileData?.profile?.id ?? profileData?.id ?? null;
+                if (isMounted && actorId) {
+                    setClientActorId(actorId);
+                }
+            })
+            .catch(() => {});
+
+        return () => {
+            isMounted = false;
+        };
+    }, []);
 
     useEffect(() => {
         let isMounted = true;
@@ -79,13 +103,21 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 setLoadingTickets(true);
             }
             try {
-                const data = await getClientTickets();
+                const data = await getClientTickets({
+                    per_page: 10,
+                    page: ticketPage,
+                    search: ticketSearch.trim(),
+                });
                 if (isMounted) {
-                    setTickets(data.demandes?.data ?? data.demandes ?? []);
+                    const demandes = data.demandes?.data ?? data.demandes ?? [];
+                    const totalPages = data.demandes?.last_page ?? data.pagination?.total_pages ?? 1;
+                    setTickets(demandes);
+                    setTicketTotalPages(totalPages);
                 }
             } catch (_) {
                 if (isMounted) {
                     setTickets([]);
+                    setTicketTotalPages(1);
                 }
             } finally {
                 isFetchingTicketsRef.current = false;
@@ -96,64 +128,258 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         };
 
         fetchTickets(true);
-        const intervalId = setInterval(() => fetchTickets(false), 10000);
 
-        return () => {
-            isMounted = false;
-            clearInterval(intervalId);
-        };
-    }, []);
+        if (!user?.id) {
+            return () => {
+                isMounted = false;
+            };
+        }
 
-    // Poll client logs to detect balance changes made by admin and build notifications
+        try {
+            const echo = getEcho();
+            const channel = echo.private(`user.user.${user.id}`);
+
+            channel.listen('.ticket.updated', (event) => {
+                const updatedTicket = event?.ticket;
+                if (!updatedTicket?.id) return;
+
+                setTickets((prev) => {
+                    const exists = prev.some((ticket) => ticket.id === updatedTicket.id);
+                    if (exists) {
+                        return prev.map((ticket) =>
+                            ticket.id === updatedTicket.id ? { ...ticket, ...updatedTicket } : ticket
+                        );
+                    }
+
+                    return [updatedTicket, ...prev];
+                });
+            });
+
+            return () => {
+                isMounted = false;
+                try {
+                    echo.leave(`user.user.${user.id}`);
+                } catch (e) {
+                    // ignore cleanup errors
+                }
+            };
+        } catch (err) {
+            // Realtime connection failed, but dashboard should still work
+            console.warn('Realtime connection failed:', err);
+            return () => {
+                isMounted = false;
+            };
+        }
+    }, [user?.id, ticketPage, ticketSearch]);
+
+    // Real-time client logs (SSE) with polling fallback for notifications
     useEffect(() => {
         let isMounted = true;
+        let eventSource = null;
 
-        const checkLogs = async () => {
-            try {
-                const data = await getClientLogs();
-                const logs = data?.logs ?? [];
-                if (!Array.isArray(logs)) return;
+        const applyLogs = async (logs) => {
+            if (!Array.isArray(logs)) return;
 
-                const notifs = logs.map(l => ({
-                    id: l.id,
-                    title: l.software_name || 'Update',
-                    message: l.description,
-                    timestamp: new Date(l.created_at),
-                    read: Boolean(l.is_read),
-                    ticketId: l.demande_id,
-                    type: l.status || 'log',
-                }));
+            const notifs = logs.map(l => ({
+                id: l.id,
+                title: l.software_name || 'Update',
+                message: l.description,
+                timestamp: new Date(l.created_at),
+                read: Boolean(l.is_read),
+                ticketId: l.demande_id,
+                type: l.status || 'log',
+            }));
 
-                if (isMounted) {
-                    setNotifications(notifs);
-                    setUnreadCount(notifs.filter(n => !n.read).length);
-                }
+            if (isMounted) {
+                setNotifications(notifs);
+                setUnreadCount(notifs.filter(n => !n.read).length);
+            }
 
-                const latestBalanceLog = logs.find(l => l.status === 'balance_change');
-                if (latestBalanceLog) {
-                    const latestId = latestBalanceLog.id;
-                    if (!lastLogIdRef.current || lastLogIdRef.current !== latestId) {
-                        lastLogIdRef.current = latestId;
-                        const profile = await getClientProfile().catch(() => null);
-                        const balance = Number(profile?.profile?.money ?? profile?.money ?? NaN);
-                        if (!Number.isNaN(balance) && isMounted) {
-                            setClientBalance(balance);
-                        }
+            const latestBalanceLog = logs.find(l => l.status === 'balance_change');
+            if (latestBalanceLog) {
+                const latestId = latestBalanceLog.id;
+                if (!lastLogIdRef.current || lastLogIdRef.current !== latestId) {
+                    lastLogIdRef.current = latestId;
+                    const profile = await getClientProfile().catch(() => null);
+                    const balance = Number(profile?.profile?.money ?? profile?.money ?? NaN);
+                    if (!Number.isNaN(balance) && isMounted) {
+                        setClientBalance(balance);
                     }
                 }
-            } catch (err) {
-                // ignore polling errors
             }
         };
 
-        checkLogs();
-        const id = setInterval(checkLogs, 8000);
-        return () => { isMounted = false; clearInterval(id); };
+        const loadInitialLogs = async () => {
+            try {
+                const data = await getClientLogs({ per_page: 50 });
+                const logs = data?.logs ?? [];
+                await applyLogs(logs);
+            } catch (_) {
+                // ignore initial fetch errors
+            }
+        };
+
+        const startEventStream = () => {
+            const token = localStorage.getItem('auth_token');
+            if (!token) {
+                return;
+            }
+
+            const streamUrl = `${getClientLogsStreamUrl()}?token=${encodeURIComponent(token)}`;
+            eventSource = new EventSource(streamUrl);
+
+            eventSource.addEventListener('logs', (event) => {
+                try {
+                    const payload = JSON.parse(event.data);
+                    applyLogs(payload?.logs ?? []);
+                } catch (_) {
+                    // ignore malformed events
+                }
+            });
+
+            eventSource.addEventListener('ping', () => {
+                // keep-alive only
+            });
+
+            eventSource.onerror = () => {
+                if (eventSource) {
+                    eventSource.close();
+                }
+            };
+        };
+
+        loadInitialLogs();
+        startEventStream();
+
+        return () => {
+            isMounted = false;
+            if (eventSource) {
+                eventSource.close();
+            }
+        };
     }, []);
 
     useEffect(() => {
         supportMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [supportMessages, showSupportChat]);
+
+    const fetchSupportHistory = async () => {
+        try {
+            const data = await getSupportBotHistory();
+            const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+            setSupportHistory(sessions);
+            if (sessions.length > 0 && !activeHistoryId) {
+                setActiveHistoryId(sessions[0].id);
+            }
+        } catch (_) {
+            setSupportHistory([]);
+        }
+    };
+
+    useEffect(() => {
+        if (showSupportChat) {
+            fetchSupportHistory();
+            setHelpSearch('');
+            setHelpCategory('all');
+        }
+    }, [showSupportChat]);
+
+    const fetchHelpCenter = async () => {
+        setHelpLoading(true);
+        setHelpError('');
+        try {
+            const data = await getHelpArticles({
+                search: helpSearch.trim(),
+                category: helpCategory === 'all' ? '' : helpCategory,
+                limit: 8,
+            });
+
+            setHelpArticles(Array.isArray(data?.articles) ? data.articles : []);
+            setHelpCategories(Array.isArray(data?.categories) ? data.categories : []);
+        } catch (err) {
+            setHelpArticles([]);
+            setHelpCategories([]);
+            setHelpError('Help Center is unavailable right now.');
+        } finally {
+            setHelpLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (showSupportChat && supportTab === 'help') {
+            fetchHelpCenter();
+        }
+    }, [showSupportChat, supportTab, helpSearch, helpCategory]);
+
+    const getHistoryTitle = (messages) => {
+        const firstUser = messages.find((m) => m.role === 'user');
+        const raw = firstUser?.content || 'Support Chat';
+        return raw.length > 48 ? `${raw.slice(0, 48)}...` : raw;
+    };
+
+    const saveSupportHistory = async (messages) => {
+        const hasUserMessage = messages.some((m) => m.role === 'user');
+        if (!hasUserMessage) return;
+
+        const trimmedMessages = messages.slice(-50).map((msg) => ({
+            role: msg.role,
+            content: msg.content,
+        }));
+
+        try {
+            await saveSupportBotHistory(getHistoryTitle(trimmedMessages), trimmedMessages);
+            await fetchSupportHistory();
+        } catch (_) {
+            // ignore history persistence errors
+        }
+    };
+
+    const closeSupportChat = async () => {
+        // Immediately close modal first (don't await)
+        setShowSupportChat(false);
+        
+        // Then cancel any pending operations
+        setIsBotReplying(false);
+        
+        if (botRequestAbortRef.current) {
+            try {
+                botRequestAbortRef.current.abort();
+            } catch (e) {
+                // ignore abort errors
+            }
+            botRequestAbortRef.current = null;
+        }
+        
+        if (botTimeoutIdRef.current) {
+            clearTimeout(botTimeoutIdRef.current);
+            botTimeoutIdRef.current = null;
+        }
+
+        // Save history in background (don't await)
+        saveSupportHistory(supportMessages).catch(() => {});
+        
+        // Reset state after brief delay to ensure modal closes first
+        setTimeout(() => {
+            setSupportMessages([supportWelcomeMessage]);
+            setSupportInput('');
+            setSupportTab('chat');
+            setActiveHistoryId(null);
+        }, 100);
+    };
+
+    // small in-app toast for important notifications (balance changes)
+    const [notificationToast, setNotificationToast] = useState(null);
+    useEffect(() => {
+        if (!notifications || notifications.length === 0) return;
+        const latest = notifications.find(n => n.type === 'balance_change' || n.type === 'log');
+        if (!latest) return;
+
+        // show toast for balance_change if it's unread
+        if (!latest.read) {
+            setNotificationToast({ id: latest.id, title: latest.title, message: latest.message });
+            setTimeout(() => setNotificationToast(null), 5000);
+        }
+    }, [notifications]);
 
     const openNotification = async (notif) => {
         try {
@@ -174,7 +400,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
         const onKeyDown = (event) => {
             if (event.key === 'Escape') {
-                setShowSupportChat(false);
+                closeSupportChat();
             }
         };
 
@@ -233,13 +459,38 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         };
 
         fetchUnread();
-        const intervalId = setInterval(fetchUnread, 5000);
 
-        return () => {
-            isMounted = false;
-            clearInterval(intervalId);
-        };
-    }, []);
+        if (!user?.id) {
+            return () => {
+                isMounted = false;
+            };
+        }
+
+        try {
+            const echo = getEcho();
+            const channel = echo.private(`user.user.${user.id}`);
+
+            channel.listen('.ticket.message.created', (event) => {
+                if (!event?.message) return;
+                setUnreadMessagesCount((prev) => prev + 1);
+            });
+
+            return () => {
+                isMounted = false;
+                try {
+                    echo.leave(`user.user.${user.id}`);
+                } catch (e) {
+                    // ignore cleanup errors
+                }
+            };
+        } catch (err) {
+            // Realtime connection failed, but component should still work
+            console.warn('Realtime message listener failed:', err);
+            return () => {
+                isMounted = false;
+            };
+        }
+    }, [user?.id]);
 
     const handleImageChange = (e) => {
         const file = e.target.files[0];
@@ -250,14 +501,6 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         e.preventDefault();
         setSubmitError('');
 
-        const selectedPriorityCost = getSelectedPriorityCost(newTicket.priority);
-        if (hasInsufficientFundsForPriority(newTicket.priority) && !allowPayLaterSubmit) {
-            setPendingPriority(newTicket.priority);
-            setShowPayLaterConfirm(true);
-            setSubmitError(`Insufficient funds for ${newTicket.priority} priority (${selectedPriorityCost} DT). Confirm pay later to continue.`);
-            return;
-        }
-        
         // Validate machine selection
         if (!createNewMachine && !newTicket.machine_id) {
             setSubmitError('Please select an existing machine or create a new one');
@@ -280,12 +523,11 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         if (newTicket.image) fd.append('image', newTicket.image);
         try {
             await createTicket(fd);
-            const data = await getClientTickets();
+            const data = await getClientTickets({ per_page: 10 });
             setTickets(data.demandes?.data ?? data.demandes ?? []);
             setNewTicket({ titre: '', description: '', machine_id: '', code_anydesk: '', priority: 'low', image: null });
             setCreateNewMachine(false);
             setShowCreateTicket(false);
-            setAllowPayLaterSubmit(false);
 
             const profileData = await getClientProfile().catch(() => null);
             const refreshedBalance = Number(profileData?.profile?.money ?? profileData?.money ?? NaN);
@@ -326,7 +568,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     )
                 );
             } else {
-                const data = await getClientTickets();
+                const data = await getClientTickets({ per_page: 10 });
                 setTickets(data.demandes?.data ?? data.demandes ?? []);
             }
 
@@ -345,6 +587,19 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         const trimmed = supportInput.trim();
         if (!trimmed || isBotReplying) return;
 
+        // Cancel any pending request
+        if (botRequestAbortRef.current) {
+            try {
+                botRequestAbortRef.current.abort();
+            } catch (e) {
+                // ignore
+            }
+        }
+        if (botTimeoutIdRef.current) {
+            clearTimeout(botTimeoutIdRef.current);
+            botTimeoutIdRef.current = null;
+        }
+
         const userMsg = {
             id: `user-${Date.now()}`,
             role: 'user',
@@ -355,13 +610,35 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         setSupportInput('');
         setIsBotReplying(true);
 
+        // Create new abort controller for this request
+        const abortController = new AbortController();
+        botRequestAbortRef.current = abortController;
+
+        // Set 8-second timeout
+        const timeoutId = setTimeout(() => {
+            try {
+                abortController.abort();
+            } catch (e) {
+                // ignore
+            }
+        }, 8000);
+        botTimeoutIdRef.current = timeoutId;
+
         try {
             const history = [...supportMessages, userMsg]
                 .slice(-12)
                 .map((m) => ({ role: m.role, content: m.content }));
 
             const response = await askSupportBot(trimmed, history);
+            
+            // Clear timeout if request succeeded
+            if (botTimeoutIdRef.current) {
+                clearTimeout(botTimeoutIdRef.current);
+                botTimeoutIdRef.current = null;
+            }
+
             const botReply = response?.reply || 'I could not generate a response right now. Please try again.';
+            const isTimeout = response?.meta?.timeout === true;
 
             setSupportMessages((prev) => [
                 ...prev,
@@ -369,44 +646,72 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     id: `assistant-${Date.now()}`,
                     role: 'assistant',
                     content: botReply,
+                    isError: isTimeout,
                 },
             ]);
         } catch (err) {
-            const errorMessage = err?.message || 'ID Soft AI Quick Support is temporarily unavailable. Please try again later.';
+            // Clear timeout on error
+            if (botTimeoutIdRef.current) {
+                clearTimeout(botTimeoutIdRef.current);
+                botTimeoutIdRef.current = null;
+            }
+
+            // Determine error message based on error type
+            let errorMessage = 'AI assistant is temporarily unavailable.';
+
+            if (err?.name === 'AbortError' || err?.message?.includes('AbortError')) {
+                errorMessage = 'Request timed out. Please try again or create a support ticket.';
+            } else if (err?.message?.includes('timeout') || err?.message?.includes('unable')) {
+                errorMessage = 'AI assistant took too long to respond. Please create a support ticket for faster help.';
+            } else if (err?.message) {
+                errorMessage = err.message;
+            } else {
+                errorMessage = 'AI assistant encountered an error. Please create a support ticket.';
+            }
+
             setSupportMessages((prev) => [
                 ...prev,
                 {
                     id: `assistant-error-${Date.now()}`,
                     role: 'assistant',
                     content: errorMessage,
+                    isError: true,
                 },
             ]);
         } finally {
             setIsBotReplying(false);
+            botRequestAbortRef.current = null;
         }
     };
 
-    const getStatusColor = (status) => {
-        switch (status) {
-            case 'submitted':
-            case 'open':
-                return 'bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400';
-            case 'assigned':
-                return 'bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400';
-            case 'in-progress':
-                return 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400';
-            case 'resolved':
-                return 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400';
-            case 'escalated':
-                return 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400';
-            default:
-                return 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200';
-        }
-    };
 
-    const userTickets = tickets;
-    const activeTickets = userTickets.filter(t => ['submitted', 'open', 'assigned', 'in-progress', 'in progress'].includes(t.status)).length;
-    const resolvedTickets = userTickets.filter(t => t.status === 'resolved').length;
+    const userTickets = useMemo(() => tickets, [tickets]);
+    const activeTickets = useMemo(
+        () => userTickets.filter(t => ['submitted', 'open', 'assigned', 'in-progress', 'in progress'].includes(t.status)).length,
+        [userTickets]
+    );
+    const resolvedTickets = useMemo(
+        () => userTickets.filter(t => t.status === 'resolved').length,
+        [userTickets]
+    );
+    const urgentTickets = useMemo(
+        () => userTickets.filter(t => t.priority === 'urgent' && t.status !== 'resolved').length,
+        [userTickets]
+    );
+    const totalTickets = useMemo(() => userTickets.length, [userTickets]);
+    const resolutionRate = useMemo(
+        () => (totalTickets > 0 ? Math.round((resolvedTickets / totalTickets) * 100) : 0),
+        [totalTickets, resolvedTickets]
+    );
+    const latestTicket = useMemo(() => (
+        [...userTickets]
+            .filter((t) => t.created_at)
+            .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
+    ), [userTickets]);
+    const lastUpdateLabel = useMemo(
+        () => (latestTicket ? new Date(latestTicket.created_at).toLocaleDateString() : '--'),
+        [latestTicket]
+    );
 
     return (
         <div className="flex h-screen overflow-hidden">
@@ -549,8 +854,8 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                         </button>
                     </div>
 
-                    {/* High-Level Metric Cards */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    {/* Vital Metrics */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
                         <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 p-6 rounded-xl flex items-center gap-5">
                             <div className="w-12 h-12 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-500 shrink-0">
                                 <span className="material-symbols-outlined text-3xl">confirmation_number</span>
@@ -558,34 +863,62 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                             <div>
                                 <p className="text-slate-500 dark:text-slate-400 text-sm font-medium">Active Tickets</p>
                                 <h3 className="text-3xl font-bold text-slate-900 dark:text-slate-100">{activeTickets}</h3>
-                                <p className="text-xs text-emerald-500 font-medium flex items-center gap-1 mt-1">
-                                    <span className="material-symbols-outlined text-xs">trending_up</span> This week
-                                </p>
+                                <p className="text-xs text-slate-500 font-medium mt-1">Last update {lastUpdateLabel}</p>
+                            </div>
+                        </div>
+                        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 p-6 rounded-xl">
+                            <div className="flex items-center gap-4">
+                                <div className="w-12 h-12 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-500 shrink-0">
+                                    <span className="material-symbols-outlined text-3xl">check_circle</span>
+                                </div>
+                                <div>
+                                    <p className="text-slate-500 dark:text-slate-400 text-sm font-medium">Resolution Rate</p>
+                                    <h3 className="text-3xl font-bold text-slate-900 dark:text-slate-100">{resolutionRate}%</h3>
+                                </div>
+                            </div>
+                            <div className="mt-4 h-2 rounded-full bg-slate-100 dark:bg-slate-800">
+                                <div
+                                    className="h-2 rounded-full bg-emerald-500"
+                                    style={{ width: `${resolutionRate}%` }}
+                                ></div>
+                            </div>
+                            <p className="text-xs text-slate-500 mt-2">{resolvedTickets} of {totalTickets} tickets closed</p>
+                        </div>
+                        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 p-6 rounded-xl flex items-center gap-5">
+                            <div className="w-12 h-12 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-500 shrink-0">
+                                <span className="material-symbols-outlined text-3xl">account_balance_wallet</span>
+                            </div>
+                            <div>
+                                <p className="text-slate-500 dark:text-slate-400 text-sm font-medium">Account Balance</p>
+                                <h3 className="text-3xl font-bold text-slate-900 dark:text-slate-100">{Number(clientBalance).toFixed(2)} DT</h3>
+                                <p className="text-xs text-slate-500 font-medium mt-1">Updated in real time</p>
                             </div>
                         </div>
                         <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 p-6 rounded-xl flex items-center gap-5">
-                            <div className="w-12 h-12 rounded-lg bg-green-500/10 flex items-center justify-center text-green-500 shrink-0">
-                                <span className="material-symbols-outlined text-3xl">check_circle</span>
+                            <div className="w-12 h-12 rounded-lg bg-rose-500/10 flex items-center justify-center text-rose-500 shrink-0">
+                                <span className="material-symbols-outlined text-3xl">priority_high</span>
                             </div>
                             <div>
-                                <p className="text-slate-500 dark:text-slate-400 text-sm font-medium">Resolved</p>
-                                <h3 className="text-3xl font-bold text-slate-900 dark:text-slate-100">{resolvedTickets}</h3>
-                                <p className="text-xs text-slate-500 font-medium mt-1">All time</p>
+                                <p className="text-slate-500 dark:text-slate-400 text-sm font-medium">Urgent Queue</p>
+                                <h3 className="text-3xl font-bold text-slate-900 dark:text-slate-100">{urgentTickets}</h3>
+                                <p className="text-xs text-slate-500 font-medium mt-1">Requires immediate action</p>
                             </div>
                         </div>
-                        <div className="bg-gradient-to-br from-primary to-orange-600 p-6 rounded-xl relative overflow-hidden shadow-lg shadow-primary/20">
-                            <div className="relative z-10 flex flex-col justify-between h-full">
-                                <div>
-                                    <p className="text-white/80 text-sm font-medium">Need Help?</p>
-                                    <h3 className="text-2xl font-bold text-white mt-1">ID Soft AI Quick Support</h3>
-                                </div>
-                                <button
-                                    onClick={() => setShowSupportChat(true)}
-                                    className="mt-4 w-full py-2 bg-white text-primary font-bold rounded-lg hover:bg-slate-50 transition-colors"
-                                >
-                                    Start AI Chat
-                                </button>
+                    </div>
+
+                    <div className="bg-gradient-to-br from-primary to-orange-600 p-6 rounded-xl relative overflow-hidden shadow-lg shadow-primary/20 mb-8">
+                        <div className="relative z-10 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                            <div>
+                                <p className="text-white/80 text-sm font-medium">Need Help?</p>
+                                <h3 className="text-2xl font-bold text-white mt-1">ID Soft AI Quick Support</h3>
+                                <p className="text-white/80 text-sm mt-1">Ask the assistant before opening a ticket.</p>
                             </div>
+                            <button
+                                onClick={() => setShowSupportChat(true)}
+                                className="px-5 py-2.5 bg-white text-primary font-bold rounded-lg hover:bg-slate-50 transition-colors"
+                            >
+                                Start AI Chat
+                            </button>
                         </div>
                     </div>
 
@@ -773,19 +1106,42 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
                     {/* Recent Tickets Table */}
                     <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-                        <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-                            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">My Support Tickets</h3>
-                            {userTickets.length > 0 && (
-                                <span className="text-sm text-slate-500">{userTickets.length} total</span>
-                            )}
+                        <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">My Support Tickets</h3>
+                                <p className="text-xs text-slate-500">Use search to filter by title or status.</p>
+                            </div>
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                                <div className="relative">
+                                    <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-base">search</span>
+                                    <input
+                                        value={ticketSearch}
+                                        onChange={(e) => {
+                                            setTicketSearch(e.target.value);
+                                            setTicketPage(1);
+                                        }}
+                                        placeholder="Search tickets..."
+                                        className="w-full sm:w-60 pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
+                                    />
+                                </div>
+                                {userTickets.length > 0 && (
+                                    <span className="text-sm text-slate-500">{userTickets.length} shown</span>
+                                )}
+                            </div>
                         </div>
                         <div className="overflow-x-auto">
-                            {userTickets.length === 0 ? (
+                            {loadingTickets ? (
+                                <div className="p-8 space-y-4">
+                                    {[...Array(4)].map((_, idx) => (
+                                        <div key={`ticket-skeleton-${idx}`} className="h-10 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse"></div>
+                                    ))}
+                                </div>
+                            ) : userTickets.length === 0 ? (
                                 <div className="p-12 text-center">
                                     <span className="material-symbols-outlined text-6xl text-slate-300 dark:text-slate-700 mb-4 block">
                                         confirmation_number
                                     </span>
-                                    <p className="text-slate-500 dark:text-slate-400 mb-4">No tickets yet</p>
+                                    <p className="text-slate-500 dark:text-slate-400 mb-4">No tickets match your search.</p>
                                     <button
                                         onClick={() => setShowCreateTicket(true)}
                                         className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 transition-colors"
@@ -816,12 +1172,12 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                                     {ticket.titre || ticket.description?.substring(0, 50)}
                                                 </td>
                                                 <td className="px-6 py-4">
-                                                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold ${getStatusColor(ticket.status)}`}>
+                                                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold uppercase ${getStatusBadgeClasses(ticket.status)}`}>
                                                         {ticket.status}
                                                     </span>
                                                 </td>
                                                 <td className="px-6 py-4">
-                                                    <span className="text-sm capitalize text-slate-600 dark:text-slate-400">
+                                                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold uppercase ${getPriorityBadgeClasses(ticket.priority)}`}>
                                                         {ticket.priority}
                                                     </span>
                                                 </td>
@@ -865,6 +1221,27 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                 </table>
                             )}
                         </div>
+                        {ticketTotalPages > 1 && (
+                            <div className="border-t border-slate-200 dark:border-slate-800 px-6 py-4 flex items-center justify-between text-sm">
+                                <span className="text-slate-500">Page {ticketPage} of {ticketTotalPages}</span>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => setTicketPage((prev) => Math.max(1, prev - 1))}
+                                        disabled={ticketPage === 1}
+                                        className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                                    >
+                                        Prev
+                                    </button>
+                                    <button
+                                        onClick={() => setTicketPage((prev) => Math.min(ticketTotalPages, prev + 1))}
+                                        disabled={ticketPage >= ticketTotalPages}
+                                        className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                                    >
+                                        Next
+                                    </button>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             </main>
@@ -953,105 +1330,190 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             )}
 
             {showSupportChat && (
-                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowSupportChat(false)}>
-                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={closeSupportChat}>
+                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl w-full max-w-3xl shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
                         <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
                             <div>
                                 <h3 className="text-lg font-bold text-slate-900 dark:text-white">ID Soft AI Quick Support</h3>
                                 <p className="text-xs text-slate-500">Powered by ID Soft AI assistant</p>
                             </div>
-                            <button onClick={() => setShowSupportChat(false)} className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors">
+                            <button onClick={closeSupportChat} className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors">
                                 <span className="material-symbols-outlined">close</span>
                             </button>
                         </div>
 
-                        <div className="h-[420px] overflow-y-auto p-4 bg-slate-50 dark:bg-slate-900/40 space-y-3">
-                            {supportMessages.map((msg) => (
-                                <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-[80%] px-4 py-2 rounded-xl text-sm ${msg.role === 'user' ? 'bg-primary text-white rounded-br-sm' : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-bl-sm border border-slate-200 dark:border-slate-700'}`}>
-                                        {msg.content}
-                                    </div>
-                                </div>
-                            ))}
-
-                            {isBotReplying && (
-                                <div className="flex justify-start">
-                                    <div className="px-4 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-500">
-                                        Assistant is typing...
-                                    </div>
-                                </div>
-                            )}
-                            <div ref={supportMessagesEndRef} />
+                        <div className="px-4 pt-4">
+                            <div className="inline-flex rounded-full bg-slate-100 dark:bg-slate-800 p-1 gap-1">
+                                <button
+                                    onClick={() => setSupportTab('chat')}
+                                    className={`px-3 py-1.5 text-xs font-bold rounded-full transition-colors ${supportTab === 'chat' ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white' : 'text-slate-500 dark:text-slate-300'}`}
+                                >
+                                    Live Chat
+                                </button>
+                                <button
+                                    onClick={() => setSupportTab('history')}
+                                    className={`px-3 py-1.5 text-xs font-bold rounded-full transition-colors ${supportTab === 'history' ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white' : 'text-slate-500 dark:text-slate-300'}`}
+                                >
+                                    History ({supportHistory.length})
+                                </button>
+                                <button
+                                    onClick={() => setSupportTab('help')}
+                                    className={`px-3 py-1.5 text-xs font-bold rounded-full transition-colors ${supportTab === 'help' ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white' : 'text-slate-500 dark:text-slate-300'}`}
+                                >
+                                    Help Center
+                                </button>
+                            </div>
                         </div>
 
-                        <div className="p-4 border-t border-slate-200 dark:border-slate-800 flex gap-2">
-                            <input
-                                type="text"
-                                value={supportInput}
-                                onChange={(e) => setSupportInput(e.target.value)}
-                                onKeyDown={(e) => {
-                                    if (e.key === 'Enter' && !e.shiftKey) {
-                                        e.preventDefault();
-                                        handleSendSupportMessage();
-                                    }
-                                }}
-                                placeholder="Describe your issue..."
-                                className="flex-1 px-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white"
-                            />
-                            <button
-                                onClick={handleSendSupportMessage}
-                                disabled={isBotReplying || !supportInput.trim()}
-                                className="px-4 py-2.5 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                                Send
-                            </button>
-                        </div>
+                        {supportTab === 'chat' ? (
+                            <>
+                                <div className="h-[420px] overflow-y-auto p-4 bg-slate-50 dark:bg-slate-900/40 space-y-3">
+                                    {supportMessages.map((msg) => (
+                                        <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                            <div className={`max-w-[80%] px-4 py-2 rounded-xl text-sm ${msg.role === 'user' ? 'bg-primary text-white rounded-br-sm' : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-bl-sm border border-slate-200 dark:border-slate-700'}`}>
+                                                {msg.content}
+                                            </div>
+                                        </div>
+                                    ))}
+
+                                    {isBotReplying && (
+                                        <div className="flex justify-start">
+                                            <div className="px-4 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-slate-500">
+                                                Assistant is typing...
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div ref={supportMessagesEndRef} />
+                                </div>
+
+                                <div className="p-4 border-t border-slate-200 dark:border-slate-800 flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={supportInput}
+                                        onChange={(e) => setSupportInput(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && !e.shiftKey) {
+                                                e.preventDefault();
+                                                handleSendSupportMessage();
+                                            }
+                                        }}
+                                        placeholder="Describe your issue..."
+                                        className="flex-1 px-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 focus:ring-2 focus:ring-primary/50 text-slate-900 dark:text-white"
+                                    />
+                                    <button
+                                        onClick={handleSendSupportMessage}
+                                        disabled={isBotReplying || !supportInput.trim()}
+                                        className="px-4 py-2.5 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        Send
+                                    </button>
+                                </div>
+                            </>
+                        ) : supportTab === 'history' ? (
+                            <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="md:col-span-1 space-y-2 max-h-[420px] overflow-y-auto">
+                                    {supportHistory.length === 0 ? (
+                                        <div className="p-6 rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-center text-sm text-slate-500">
+                                            No previous chats yet.
+                                        </div>
+                                    ) : (
+                                        supportHistory.map((entry) => (
+                                            <button
+                                                key={entry.id}
+                                                onClick={() => setActiveHistoryId(entry.id)}
+                                                className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${activeHistoryId === entry.id ? 'border-primary bg-primary/10 text-slate-900 dark:text-white' : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/60'}`}
+                                            >
+                                                <p className="font-semibold line-clamp-2">{entry.title}</p>
+                                                <p className="text-[10px] text-slate-400 mt-1">{new Date(entry.createdAt).toLocaleString()}</p>
+                                            </button>
+                                        ))
+                                    )}
+                                </div>
+                                <div className="md:col-span-2 bg-slate-50 dark:bg-slate-900/40 rounded-lg p-4 max-h-[420px] overflow-y-auto">
+                                    {supportHistory.length === 0 ? (
+                                        <div className="h-full flex items-center justify-center text-sm text-slate-500">Select a chat to view details.</div>
+                                    ) : (
+                                        (supportHistory.find((entry) => entry.id === activeHistoryId) || supportHistory[0])?.messages?.map((msg, idx) => (
+                                            <div key={`${activeHistoryId}-${idx}`} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} mb-2`}>
+                                                <div className={`max-w-[80%] px-3 py-2 rounded-xl text-sm ${msg.role === 'user' ? 'bg-primary text-white rounded-br-sm' : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-bl-sm border border-slate-200 dark:border-slate-700'}`}>
+                                                    {msg.content}
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-4 space-y-4">
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    <div className="md:col-span-2 relative">
+                                        <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-base">search</span>
+                                        <input
+                                            value={helpSearch}
+                                            onChange={(e) => setHelpSearch(e.target.value)}
+                                            placeholder="Search help articles..."
+                                            className="w-full pl-9 pr-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                        />
+                                    </div>
+                                    <select
+                                        value={helpCategory}
+                                        onChange={(e) => setHelpCategory(e.target.value)}
+                                        className="w-full px-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
+                                    >
+                                        <option value="all">All categories</option>
+                                        {helpCategories.map((category) => (
+                                            <option key={category} value={category}>{category}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {helpError && (
+                                    <div className="p-3 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 text-sm">
+                                        {helpError}
+                                    </div>
+                                )}
+
+                                {helpLoading ? (
+                                    <div className="space-y-3">
+                                        {[...Array(3)].map((_, idx) => (
+                                            <div key={`help-skeleton-${idx}`} className="h-20 rounded-xl bg-slate-100 dark:bg-slate-800 animate-pulse"></div>
+                                        ))}
+                                    </div>
+                                ) : helpArticles.length === 0 ? (
+                                    <div className="p-8 text-center rounded-xl border border-dashed border-slate-200 dark:border-slate-700 text-sm text-slate-500">
+                                        No help articles matched your search.
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[420px] overflow-y-auto pr-1">
+                                        {helpArticles.map((article) => (
+                                            <article key={article.id} className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-4 hover:border-primary/40 transition-colors">
+                                                <div className="flex items-start justify-between gap-3">
+                                                    <div>
+                                                        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">{article.category}</p>
+                                                        <h4 className="font-bold text-slate-900 dark:text-white mt-1">{article.title}</h4>
+                                                    </div>
+                                                    <span className="material-symbols-outlined text-primary text-lg">menu_book</span>
+                                                </div>
+                                                <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 line-clamp-3">{article.summary}</p>
+                                                {Array.isArray(article.keywords) && article.keywords.length > 0 && (
+                                                    <div className="flex flex-wrap gap-2 mt-3">
+                                                        {article.keywords.slice(0, 3).map((keyword) => (
+                                                            <span key={keyword} className="text-[10px] font-bold uppercase px-2 py-1 rounded-full bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
+                                                                {keyword}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </article>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
 
-            {showPayLaterConfirm && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={() => setShowPayLaterConfirm(false)}>
-                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl max-w-md w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
-                        <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex items-center gap-3">
-                            <span className="material-symbols-outlined text-amber-500">warning</span>
-                            <h3 className="text-lg font-bold text-slate-900 dark:text-white">Insufficient Funds</h3>
-                        </div>
-                        <div className="p-5 space-y-3 text-sm text-slate-600 dark:text-slate-300">
-                            <p>
-                                This priority requires <strong>{getSelectedPriorityCost(pendingPriority || newTicket.priority)} DT</strong>,
-                                but your current balance is <strong>{Number(clientBalance).toFixed(3)} DT</strong>.
-                            </p>
-                            <p>Would you like to continue and pay later?</p>
-                        </div>
-                        <div className="px-5 pb-5 flex justify-end gap-3">
-                            <button
-                                onClick={() => {
-                                    setShowPayLaterConfirm(false);
-                                    setPendingPriority(null);
-                                    setAllowPayLaterSubmit(false);
-                                }}
-                                className="px-4 py-2 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                            >
-                                Choose Different Priority
-                            </button>
-                            <button
-                                onClick={() => {
-                                    const nextPriority = pendingPriority || newTicket.priority;
-                                    setNewTicket((prev) => ({ ...prev, priority: nextPriority }));
-                                    setAllowPayLaterSubmit(true);
-                                    setShowPayLaterConfirm(false);
-                                    setPendingPriority(null);
-                                    setSubmitError('You chose to continue with pay-later. Admin will be notified about your debt status.');
-                                }}
-                                className="px-4 py-2 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 transition-colors"
-                            >
-                                Continue & Pay Later
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }

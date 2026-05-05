@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Ticket, Users, Clock, CheckCircle, AlertTriangle, LogOut, User, Filter, Search, Send, Star } from 'lucide-react';
 import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmployeeTicket, sendMessage, startConversation, getEmployeeStats, getTicketMessages, getUnreadMessages } from '../../services/api';
+import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmployeeTicket, sendMessage, startConversation, getEmployeeStats, getTicketMessages, getUnreadMessages, getConversations } from '../../services/api';
+import { getEcho } from '../../services/realtime';
 
 export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const BACKEND_BASE_URL = 'http://127.0.0.1:8000';
@@ -18,10 +19,16 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const [messageText, setMessageText] = useState('');
     const [isSubmittingMessage, setIsSubmittingMessage] = useState(false);
     const [showOnlyMyTickets, setShowOnlyMyTickets] = useState(false);
+    const [ticketPage, setTicketPage] = useState(1);
+    const [ticketTotalPages, setTicketTotalPages] = useState(1);
+    const ticketPerPage = 10;
     const [conversationMessages, setConversationMessages] = useState([]);
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [conversationId, setConversationId] = useState(null);
     const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
+    const [notifications, setNotifications] = useState([]);
+    const [showNotifications, setShowNotifications] = useState(false);
+    const [notificationsLoading, setNotificationsLoading] = useState(false);
     const [toast, setToast] = useState(null);
     const [actionLoading, setActionLoading] = useState({});
     const messagesEndRef = useRef(null);
@@ -59,10 +66,19 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         }
         setTicketsError('');
         try {
-            const [data, stats] = await Promise.all([getEmployeeTickets(), getEmployeeStats()]);
+            const [data, stats] = await Promise.all([
+                getEmployeeTickets({
+                    per_page: ticketPerPage,
+                    page: ticketPage,
+                    search: debouncedSearchQuery,
+                    status: filterStatus === 'all' ? '' : filterStatus,
+                }),
+                getEmployeeStats(),
+            ]);
             setAllTickets(data.all_tickets?.data ?? data.all_tickets ?? []);
             setMyTickets(data.my_tickets?.data ?? data.my_tickets ?? []);
             setUnassignedTickets(data.unassigned_tickets?.data ?? data.unassigned_tickets ?? []);
+            setTicketTotalPages(data.all_tickets?.last_page ?? data.all_tickets?.pagination?.total_pages ?? 1);
             setEmployeeStats(stats);
         } catch (err) {
             console.error('Failed to fetch employee tickets:', err);
@@ -70,6 +86,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
             setMyTickets([]);
             setUnassignedTickets([]);
             setTicketsError('Failed to load tickets. Please retry.');
+            setTicketTotalPages(1);
         } finally {
             if (!silent) {
                 setLoading(false);
@@ -99,7 +116,11 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         return () => clearTimeout(timeoutId);
     }, [toast]);
 
-    useEffect(() => { fetchTickets(); }, []);
+    useEffect(() => { fetchTickets(); }, [ticketPage, debouncedSearchQuery, filterStatus]);
+
+    useEffect(() => {
+        setTicketPage(1);
+    }, [debouncedSearchQuery, filterStatus]);
 
     useEffect(() => {
         let isMounted = true;
@@ -114,13 +135,50 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         };
 
         fetchUnread();
-        const intervalId = setInterval(fetchUnread, 2000);
+
+        if (!user?.id) {
+            return () => {
+                isMounted = false;
+            };
+        }
+
+        const echo = getEcho();
+        const channel = echo.private(`user.user.${user.id}`);
+
+        channel.listen('.ticket.message.created', (event) => {
+            if (!event?.message) return;
+            setUnreadMessagesCount((prev) => prev + 1);
+        });
 
         return () => {
             isMounted = false;
-            clearInterval(intervalId);
+            echo.leave(`user.user.${user.id}`);
         };
-    }, []);
+    }, [user?.id]);
+
+    const loadNotifications = async () => {
+        setNotificationsLoading(true);
+        try {
+            const [summary, conversationsData] = await Promise.all([
+                getUnreadMessages(),
+                getConversations(),
+            ]);
+            setUnreadMessagesCount(Number(summary?.total_unread ?? 0));
+            setNotifications(Array.isArray(conversationsData?.conversations) ? conversationsData.conversations : []);
+        } catch (_) {
+            setNotifications([]);
+        } finally {
+            setNotificationsLoading(false);
+        }
+    };
+
+    const toggleNotifications = () => {
+        const next = !showNotifications;
+        setShowNotifications(next);
+        if (next) {
+            loadNotifications();
+        }
+    };
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -162,11 +220,32 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         if (!selectedTicket?.id) return;
 
         fetchConversationMessages(selectedTicket);
-        const intervalId = setInterval(() => {
-            fetchConversationMessages(selectedTicket, { silent: true });
-        }, 4000);
 
-        return () => clearInterval(intervalId);
+        const echo = getEcho();
+        const channel = echo.private(`ticket.${selectedTicket.id}`);
+
+        channel.listen('.ticket.message.created', (event) => {
+            const incoming = event?.message;
+            if (!incoming) return;
+
+            setConversationMessages((prev) => {
+                if (prev.some((msg) => msg.id === incoming.id)) {
+                    return prev;
+                }
+                return [...prev, incoming];
+            });
+        });
+
+        channel.listen('.ticket.updated', (event) => {
+            const updatedTicket = event?.ticket;
+            if (!updatedTicket) return;
+            if (updatedTicket.id !== selectedTicket.id) return;
+            setSelectedTicket((prev) => (prev ? { ...prev, ...updatedTicket } : updatedTicket));
+        });
+
+        return () => {
+            echo.leave(`ticket.${selectedTicket.id}`);
+        };
     }, [selectedTicket?.id]);
 
     const handleBellClick = async () => {
@@ -387,25 +466,24 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
 
     const priorityOrder = { urgent: 0, high: 1, medium: 2, low: 3 };
 
-    const displayedTickets = showOnlyMyTickets ? myTickets : allTickets;
-    
-    const filteredTickets = displayedTickets
-        .filter(t => filterStatus === 'all' || t.status === filterStatus)
-        .filter(t => debouncedSearchQuery === '' ||
-            t.titre?.toLowerCase().includes(debouncedSearchQuery) ||
-            t.description?.toLowerCase().includes(debouncedSearchQuery) ||
-            t.client?.nom?.toLowerCase().includes(debouncedSearchQuery)
-        )
-        .sort((a, b) => (priorityOrder[a.priority] ?? 4) - (priorityOrder[b.priority] ?? 4));
+    const displayedTickets = useMemo(
+        () => (showOnlyMyTickets ? myTickets : allTickets),
+        [showOnlyMyTickets, myTickets, allTickets]
+    );
 
-    const stats = {
+    const filteredTickets = useMemo(() => (
+        displayedTickets
+            .sort((a, b) => (priorityOrder[a.priority] ?? 4) - (priorityOrder[b.priority] ?? 4))
+    ), [displayedTickets, priorityOrder]);
+
+    const stats = useMemo(() => ({
         total: displayedTickets.length,
         submitted: displayedTickets.filter(t => t.status === 'submitted').length,
         inProgress: displayedTickets.filter(t => t.status === 'in progress' || t.status === 'in-progress').length,
-        resolved: displayedTickets.filter(t => t.status === 'resolved').length
-    };
+        resolved: displayedTickets.filter(t => t.status === 'resolved').length,
+    }), [displayedTickets]);
 
-    const getAverageFirstResponseHours = () => {
+    const avgFirstResponseHours = useMemo(() => {
         const respondedTickets = allTickets.filter(
             (ticket) => ticket?.created_at && ticket?.assigned_at
         );
@@ -426,7 +504,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         }, 0);
 
         return totalHours / respondedTickets.length;
-    };
+    }, [allTickets]);
 
     const formatDurationFromHours = (hours) => {
         if (hours === null || Number.isNaN(hours)) {
@@ -454,10 +532,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         });
     };
 
-    const avgFirstResponseHours = getAverageFirstResponseHours();
-
-    // performance chart data by grouping resolved tickets by week
-    const getPerformanceChartData = () => {
+    const performanceChartData = useMemo(() => {
         const resolved = displayedTickets.filter(t => t.status === 'resolved');
         const weekData = {};
         resolved.forEach(ticket => {
@@ -469,28 +544,26 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
             weekData[week].tickets += 1;
             weekData[week].avgRating = (weekData[week].avgRating + (ticket.client_rating || 0)) / 2;
         });
-        return Object.values(weekData).slice(-8); // Last 8 weeks
-    };
+        return Object.values(weekData).slice(-8);
+    }, [displayedTickets]);
 
-    //  priority breakdown data
-    const getPriorityChartData = () => {
-        return [
+    const priorityChartData = useMemo(() => (
+        [
             { name: 'Urgent', value: allTickets.filter(t => t.priority === 'urgent').length, color: '#dc2626' },
             { name: 'High', value: allTickets.filter(t => t.priority === 'high').length, color: '#f97316' },
             { name: 'Medium', value: allTickets.filter(t => t.priority === 'medium').length, color: '#eab308' },
             { name: 'Low', value: allTickets.filter(t => t.priority === 'low').length, color: '#22c55e' }
-        ].filter(item => item.value > 0);
-    };
+        ].filter(item => item.value > 0)
+    ), [allTickets]);
 
-    //  status breakdown chart data
-    const getStatusChartData = () => {
-        return [
+    const statusChartData = useMemo(() => (
+        [
             { name: 'Submitted', value: allTickets.filter(t => t.status === 'submitted').length },
             { name: 'Assigned', value: allTickets.filter(t => t.status === 'assigned').length },
             { name: 'In Progress', value: allTickets.filter(t => ['in-progress', 'in progress'].includes(t.status)).length },
             { name: 'Resolved', value: allTickets.filter(t => t.status === 'resolved').length }
-        ].filter(item => item.value > 0);
-    };
+        ].filter(item => item.value > 0)
+    ), [allTickets]);
 
     return (
         <div className="flex h-screen overflow-hidden bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 antialiased font-display">
@@ -563,18 +636,75 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                         </div>
                     </div>
                     <div className="flex items-center gap-4">
-                        <button
-                            onClick={handleBellClick}
-                            className="size-10 flex items-center justify-center rounded-lg bg-slate-100 dark:bg-[#3a2f27] text-slate-600 dark:text-[#bba99b] hover:text-primary transition-colors relative"
-                            title="Open notifications and ticket chat"
-                        >
-                            <span className="material-symbols-outlined">notifications</span>
-                            {unreadMessagesCount > 0 && (
-                                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 bg-primary text-white rounded-full border-2 border-white dark:border-[#181411] text-[10px] font-bold leading-[14px] flex items-center justify-center">
-                                    {unreadMessagesCount > 99 ? '99+' : unreadMessagesCount}
-                                </span>
+                        <div className="relative">
+                            <button
+                                onClick={toggleNotifications}
+                                className="size-10 flex items-center justify-center rounded-lg bg-slate-100 dark:bg-[#3a2f27] text-slate-600 dark:text-[#bba99b] hover:text-primary transition-colors relative"
+                                title="Notifications"
+                            >
+                                <span className="material-symbols-outlined">notifications</span>
+                                {unreadMessagesCount > 0 && (
+                                    <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 bg-primary text-white rounded-full border-2 border-white dark:border-[#181411] text-[10px] font-bold leading-[14px] flex items-center justify-center">
+                                        {unreadMessagesCount > 99 ? '99+' : unreadMessagesCount}
+                                    </span>
+                                )}
+                            </button>
+
+                            {showNotifications && (
+                                <div className="absolute right-0 mt-2 w-80 bg-white dark:bg-[#1e1a16] rounded-lg shadow-2xl border border-slate-200 dark:border-[#3a2f27] z-50 max-h-96 overflow-y-auto">
+                                    <div className="p-4 border-b border-slate-200 dark:border-[#3a2f27] sticky top-0 bg-white dark:bg-[#1e1a16]">
+                                        <div className="flex items-center justify-between">
+                                            <h3 className="font-bold text-slate-900 dark:text-white">Notifications</h3>
+                                            {unreadMessagesCount > 0 && (
+                                                <span className="bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-xs font-bold px-2 py-1 rounded">
+                                                    {unreadMessagesCount} new
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="divide-y divide-slate-100 dark:divide-[#3a2f27]">
+                                        {notificationsLoading && (
+                                            <div className="p-4 text-sm text-slate-500">Loading notifications...</div>
+                                        )}
+                                        {!notificationsLoading && notifications.length === 0 && (
+                                            <div className="p-8 text-center">
+                                                <span className="material-symbols-outlined text-slate-300 dark:text-slate-600 text-3xl block mb-2">notifications_none</span>
+                                                <p className="text-sm text-slate-500 dark:text-slate-400">No notifications yet</p>
+                                            </div>
+                                        )}
+                                        {!notificationsLoading && notifications.map((notif) => (
+                                            <div
+                                                key={notif.id}
+                                                onClick={() => setShowNotifications(false)}
+                                                className={`p-4 cursor-pointer hover:bg-slate-50 dark:hover:bg-[#3a2f27]/40 transition-colors ${notif.unread_count > 0 ? 'bg-blue-50 dark:bg-blue-900/10' : ''}`}
+                                            >
+                                                <div className="flex items-start gap-3">
+                                                    <div className="flex-shrink-0 mt-1">
+                                                        <span className="material-symbols-outlined text-blue-500 text-xl">chat</span>
+                                                    </div>
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex items-center justify-between">
+                                                            <p className="font-bold text-slate-900 dark:text-white text-sm truncate">
+                                                                {notif.other_participant?.name || 'Conversation'}
+                                                            </p>
+                                                            {notif.unread_count > 0 && (
+                                                                <div className="w-2 h-2 bg-red-500 rounded-full flex-shrink-0 ml-2"></div>
+                                                            )}
+                                                        </div>
+                                                        <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 line-clamp-2">
+                                                            {notif.last_message?.message || 'No messages yet.'}
+                                                        </p>
+                                                        <p className="text-xs text-slate-400 dark:text-slate-500 mt-2">
+                                                            {notif.updated_at ? new Date(notif.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
                             )}
-                        </button>
+                        </div>
                         <div className="h-8 w-px bg-slate-200 dark:bg-[#3a2f27]"></div>
                         <div className="flex items-center gap-3 pl-2">
                             <div className="text-right hidden sm:block">
@@ -666,13 +796,13 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                             <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm">
                                 <h3 className="font-bold text-lg text-slate-900 dark:text-white mb-4">Resolution Performance</h3>
                                 <ResponsiveContainer width="100%" height={250}>
-                                    <LineChart data={getPerformanceChartData()}>
-                                        <CartesianGrid strokeDasharray="3 3" stroke="#3a2f27" />
+                                    <LineChart data={performanceChartData}>
+                                        <CartesianGrid strokeDasharray="2 6" stroke="#3a2f27" />
                                         <XAxis dataKey="name" stroke="#bba99b" style={{ fontSize: '12px' }} />
                                         <YAxis stroke="#bba99b" style={{ fontSize: '12px' }} />
                                         <Tooltip contentStyle={{ backgroundColor: '#1e1a16', border: '1px solid #3a2f27', borderRadius: '8px', color: '#fff' }} />
                                         <Legend />
-                                        <Line type="monotone" dataKey="tickets" stroke="#f96f06" name="Tickets Completed" strokeWidth={2} />
+                                        <Line type="monotone" dataKey="tickets" stroke="var(--color-chart-1)" name="Tickets Completed" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
                                     </LineChart>
                                 </ResponsiveContainer>
                             </div>
@@ -682,12 +812,12 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                 <h3 className="font-bold text-lg text-slate-900 dark:text-white mb-4">Priority Distribution</h3>
                                 <ResponsiveContainer width="100%" height={250}>
                                     <PieChart>
-                                        <Pie data={getPriorityChartData()} cx="50%" cy="50%" labelLine={false} label={({ name, value }) => `${name} (${value})`} outerRadius={80} fill="#8884d8" dataKey="value">
-                                            {getPriorityChartData().map((entry, index) => (
+                                        <Pie data={priorityChartData} cx="50%" cy="50%" labelLine={false} label={({ name, value }) => `${name} (${value})`} outerRadius={85} innerRadius={45} fill="#8884d8" dataKey="value">
+                                            {priorityChartData.map((entry, index) => (
                                                 <Cell key={`cell-${index}`} fill={entry.color} />
                                             ))}
                                         </Pie>
-                                        <Tooltip />
+                                        <Tooltip contentStyle={{ backgroundColor: '#1e1a16', border: '1px solid #3a2f27', borderRadius: '8px', color: '#fff' }} />
                                     </PieChart>
                                 </ResponsiveContainer>
                             </div>
@@ -696,12 +826,12 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                             <div className="bg-white dark:bg-[#1e1a16] p-6 rounded-xl border border-slate-200 dark:border-[#3a2f27] shadow-sm lg:col-span-2">
                                 <h3 className="font-bold text-lg text-slate-900 dark:text-white mb-4">Ticket Status Overview</h3>
                                 <ResponsiveContainer width="100%" height={250}>
-                                    <BarChart data={getStatusChartData()}>
-                                        <CartesianGrid strokeDasharray="3 3" stroke="#3a2f27" />
+                                    <BarChart data={statusChartData} barSize={28}>
+                                        <CartesianGrid strokeDasharray="2 6" stroke="#3a2f27" />
                                         <XAxis dataKey="name" stroke="#bba99b" style={{ fontSize: '12px' }} />
                                         <YAxis stroke="#bba99b" style={{ fontSize: '12px' }} />
                                         <Tooltip contentStyle={{ backgroundColor: '#1e1a16', border: '1px solid #3a2f27', borderRadius: '8px', color: '#fff' }} />
-                                        <Bar dataKey="value" fill="#f96f06" radius={[8, 8, 0, 0]} />
+                                        <Bar dataKey="value" fill="var(--color-chart-2)" radius={[8, 8, 0, 0]} />
                                     </BarChart>
                                 </ResponsiveContainer>
                             </div>
@@ -774,9 +904,6 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                             Active
                                         </button>
                                     </div>
-                                    <select className="bg-slate-100 dark:bg-[#181411] border-none rounded-lg text-xs font-bold px-3 py-2 pr-8 focus:ring-0 text-slate-900 dark:text-[#bba99b]">
-                                        <option>Software Type</option>
-                                    </select>
                                     <button
                                         onClick={() => fetchTickets()}
                                         className="px-3 py-2 text-xs font-semibold rounded-lg bg-slate-100 dark:bg-[#181411] hover:bg-slate-200 dark:hover:bg-[#3a2f27] text-slate-700 dark:text-[#bba99b] transition-colors"
@@ -913,6 +1040,27 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                     </tbody>
                                 </table>
                             </div>
+                            {ticketTotalPages > 1 && (
+                                <div className="border-t border-slate-200 dark:border-[#3a2f27] px-6 py-4 flex items-center justify-between text-sm">
+                                    <span className="text-slate-500 dark:text-[#bba99b]">Page {ticketPage} of {ticketTotalPages}</span>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => setTicketPage((prev) => Math.max(1, prev - 1))}
+                                            disabled={ticketPage === 1}
+                                            className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-[#3a2f27] text-slate-600 dark:text-[#bba99b] disabled:opacity-50"
+                                        >
+                                            Prev
+                                        </button>
+                                        <button
+                                            onClick={() => setTicketPage((prev) => Math.min(ticketTotalPages, prev + 1))}
+                                            disabled={ticketPage >= ticketTotalPages}
+                                            className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-[#3a2f27] text-slate-600 dark:text-[#bba99b] disabled:opacity-50"
+                                        >
+                                            Next
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>

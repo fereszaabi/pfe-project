@@ -4,12 +4,20 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Carbon\Carbon;
 
 class Demande extends Model
 {
     use HasFactory;
 
     public $timestamps = false;
+
+    protected $appends = [
+        'sla_hours',
+        'sla_due_at',
+        'sla_breached',
+        'sla_state',
+    ];
 
     protected $fillable = [
         'titre',
@@ -56,6 +64,24 @@ class Demande extends Model
         'admin_approved_override' => 'boolean',
     ];
 
+    public function getImageAttribute($value)
+    {
+        if (empty($value)) {
+            return $value;
+        }
+
+        if (filter_var($value, FILTER_VALIDATE_URL)) {
+            return $value;
+        }
+
+        $normalized = ltrim($value, '/');
+        if (str_starts_with($normalized, 'storage/')) {
+            return url($normalized);
+        }
+
+        return asset('storage/' . $normalized);
+    }
+
     public function client()
     {
         return $this->belongsTo(Client::class, 'id_client');
@@ -69,6 +95,56 @@ class Demande extends Model
     public function machine()
     {
         return $this->belongsTo(Machine::class, 'id_machine');
+    }
+
+    public function getSlaHoursAttribute(): int
+    {
+        return match (strtolower((string) $this->priority)) {
+            'urgent' => 2,
+            'high' => 6,
+            'medium' => 12,
+            default => 24,
+        };
+    }
+
+    public function getSlaDueAtAttribute(): ?Carbon
+    {
+        if (!$this->created_at) {
+            return null;
+        }
+
+        return $this->created_at->copy()->addHours($this->sla_hours);
+    }
+
+    public function getSlaBreachedAttribute(): bool
+    {
+        if (in_array($this->status, ['resolved', 'closed'], true)) {
+            return false;
+        }
+
+        $dueAt = $this->sla_due_at;
+        if (!$dueAt) {
+            return false;
+        }
+
+        return now()->greaterThan($dueAt);
+    }
+
+    public function getSlaStateAttribute(): string
+    {
+        if (in_array($this->status, ['resolved', 'closed'], true)) {
+            return 'closed';
+        }
+
+        if ($this->sla_breached) {
+            return 'breached';
+        }
+
+        if ($this->assigned_at) {
+            return 'in_progress';
+        }
+
+        return 'pending';
     }
 
     /**

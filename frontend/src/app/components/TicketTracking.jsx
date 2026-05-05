@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { getClientTicket, deleteTicket, getTicketMessages, sendMessage, deleteTicketImage } from '../../services/api';
+import { getEcho } from '../../services/realtime';
 
 export function TicketTracking({ ticketId, onBack }) {
     const [ticket, setTicket] = useState(null);
@@ -21,6 +22,46 @@ export function TicketTracking({ ticketId, onBack }) {
     const [showChat, setShowChat] = useState(false);
     const messagesEndRef = useRef(null);
     const lastSeenMessageIdRef = useRef(null);
+
+    const ticketTimeline = ticket ? [
+        {
+            key: 'created',
+            label: 'Ticket Created',
+            detail: ticket.created_at ? new Date(ticket.created_at).toLocaleString() : 'Unknown time',
+            active: true,
+            icon: 'task_alt',
+        },
+        {
+            key: 'assigned',
+            label: ticket.employee ? `Assigned to ${ticket.employee.name || ticket.employee.nom || 'technician'}` : 'Waiting for assignment',
+            detail: ticket.assigned_at ? new Date(ticket.assigned_at).toLocaleString() : 'Not assigned yet',
+            active: Boolean(ticket.assigned_at || ticket.employee),
+            icon: 'person_add',
+        },
+        {
+            key: 'in-progress',
+            label: 'Work in Progress',
+            detail: ['in progress', 'in-progress', 'resolved', 'closed'].includes(ticket.status)
+                ? 'Technician has started working on this ticket'
+                : 'Not started yet',
+            active: ['in progress', 'in-progress', 'resolved', 'closed'].includes(ticket.status),
+            icon: 'construction',
+        },
+        {
+            key: 'resolved',
+            label: 'Resolution / Closure',
+            detail: ticket.completed_at ? new Date(ticket.completed_at).toLocaleString() : 'Still open',
+            active: ['resolved', 'closed'].includes(ticket.status),
+            icon: 'check_circle',
+        },
+        {
+            key: 'rated',
+            label: 'Client Rating',
+            detail: ticket.client_rating ? `${ticket.client_rating}/5 stars` : 'Pending your review',
+            active: Boolean(ticket.client_rating),
+            icon: 'star',
+        },
+    ] : [];
 
     const isMessageFromTechnician = (msg) => {
         if (!msg) return false;
@@ -61,8 +102,6 @@ export function TicketTracking({ ticketId, onBack }) {
 
     useEffect(() => {
         loadTicket();
-        const pollInterval = setInterval(checkForUpdates, 10000); // Poll every 10 seconds
-        return () => clearInterval(pollInterval);
     }, [ticketId]);
 
     const scrollToBottom = () => {
@@ -78,11 +117,80 @@ export function TicketTracking({ ticketId, onBack }) {
     useEffect(() => {
         if (!ticketId) return;
 
-        const intervalId = setInterval(() => {
-            fetchConversationMessages({ silent: true });
-        }, 5000);
+        const echo = getEcho();
+        const channel = echo.private(`ticket.${ticketId}`);
 
-        return () => clearInterval(intervalId);
+        channel.listen('.ticket.message.created', (event) => {
+            const incoming = event?.message;
+            if (!incoming) return;
+
+            setConversationMessages((prev) => {
+                if (prev.some((msg) => msg.id === incoming.id)) {
+                    return prev;
+                }
+                return [...prev, incoming];
+            });
+
+            if (isMessageFromTechnician(incoming)) {
+                const newNotification = {
+                    id: Date.now(),
+                    type: 'message',
+                    title: 'New Message',
+                    message: `New message from technician: ${incoming.message?.slice(0, 60) || ''}`,
+                    timestamp: new Date(),
+                    read: false,
+                };
+                setNotifications((prev) => [newNotification, ...prev]);
+                setUnreadCount((prev) => prev + 1);
+                setNotificationToast(newNotification);
+                setTimeout(() => setNotificationToast(null), 5000);
+            }
+        });
+
+        channel.listen('.ticket.updated', (event) => {
+            const updatedTicket = event?.ticket;
+            if (!updatedTicket) return;
+
+            setTicket((prev) => {
+                if (!prev) return updatedTicket;
+
+                if (updatedTicket.status && prev.status && updatedTicket.status !== prev.status) {
+                    const newNotification = {
+                        id: Date.now(),
+                        type: 'status_change',
+                        title: 'Ticket Status Updated',
+                        message: `Status changed from ${prev.status} to ${updatedTicket.status}`,
+                        timestamp: new Date(),
+                        read: false,
+                        oldStatus: prev.status,
+                        newStatus: updatedTicket.status,
+                    };
+                    setNotifications((prevNotifs) => [newNotification, ...prevNotifs]);
+                    setUnreadCount((prevCount) => prevCount + 1);
+                    setNotificationToast(newNotification);
+                    setTimeout(() => setNotificationToast(null), 5000);
+                } else if (updatedTicket.employee && !prev.employee && updatedTicket.id_employee) {
+                    const newNotification = {
+                        id: Date.now(),
+                        type: 'assignment',
+                        title: 'Ticket Assigned',
+                        message: `Your ticket has been assigned to ${updatedTicket.employee.name}`,
+                        timestamp: new Date(),
+                        read: false,
+                    };
+                    setNotifications((prevNotifs) => [newNotification, ...prevNotifs]);
+                    setUnreadCount((prevCount) => prevCount + 1);
+                    setNotificationToast(newNotification);
+                    setTimeout(() => setNotificationToast(null), 5000);
+                }
+
+                return { ...prev, ...updatedTicket };
+            });
+        });
+
+        return () => {
+            echo.leave(`ticket.${ticketId}`);
+        };
     }, [ticketId]);
 
     const fetchConversationMessages = async (options = {}) => {
@@ -209,9 +317,10 @@ export function TicketTracking({ ticketId, onBack }) {
             setLoading(true);
             setError(null);
             const data = await getClientTicket(ticketId);
-            setTicket(data);
-            if (data.status && !previousStatus) {
-                setPreviousStatus(data.status);
+            const ticketData = data?.ticket ?? data;
+            setTicket(ticketData);
+            if (ticketData?.status && !previousStatus) {
+                setPreviousStatus(ticketData.status);
             }
             // Load messages for this ticket
             await fetchConversationMessages();
@@ -223,45 +332,6 @@ export function TicketTracking({ ticketId, onBack }) {
         }
     };
 
-    const checkForUpdates = async () => {
-        try {
-            const data = await getClientTicket(ticketId);
-            if (ticket && data.status !== ticket.status) {
-                // Status changed, add notification
-                const newNotification = {
-                    id: Date.now(),
-                    type: 'status_change',
-                    title: 'Ticket Status Updated',
-                    message: `Status changed from ${ticket.status} to ${data.status}`,
-                    timestamp: new Date(),
-                    read: false,
-                    oldStatus: ticket.status,
-                    newStatus: data.status
-                };
-                setNotifications(prev => [newNotification, ...prev]);
-                setUnreadCount(prev => prev + 1);
-                setNotificationToast(newNotification);
-                setTimeout(() => setNotificationToast(null), 5000);
-            } else if (ticket && data.employee && !ticket.employee && data.id_employee) {
-                // Ticket was assigned
-                const newNotification = {
-                    id: Date.now(),
-                    type: 'assignment',
-                    title: 'Ticket Assigned',
-                    message: `Your ticket has been assigned to ${data.employee.name}`,
-                    timestamp: new Date(),
-                    read: false
-                };
-                setNotifications(prev => [newNotification, ...prev]);
-                setUnreadCount(prev => prev + 1);
-                setNotificationToast(newNotification);
-                setTimeout(() => setNotificationToast(null), 5000);
-            }
-            setTicket(data);
-        } catch (err) {
-            console.error('Error checking for updates:', err);
-        }
-    };
 
     const markAsRead = (notifId) => {
         setNotifications(prev => prev.map(n => n.id === notifId ? { ...n, read: true } : n));
@@ -517,6 +587,48 @@ export function TicketTracking({ ticketId, onBack }) {
                             <h3 className="text-lg font-bold mb-8 flex items-center gap-2">
                                 <span className="material-symbols-outlined text-primary">route</span> Ticket Status
                             </h3>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
+                                <div className="rounded-xl border border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-900/30 p-4 lg:col-span-2">
+                                    <div className="flex items-start justify-between gap-4">
+                                        <div>
+                                            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Portal Summary</p>
+                                            <h4 className="text-xl font-bold mt-1">#{ticket.id} {ticket.titre || 'Support Ticket'}</h4>
+                                            <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 max-w-3xl">
+                                                {ticket.description || 'No description provided.'}
+                                            </p>
+                                        </div>
+                                        <div className="text-right">
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Priority</p>
+                                            <span className="inline-flex mt-2 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                                                {ticket.priority || 'normal'}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="rounded-xl border border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-900/30 p-4">
+                                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Assigned Technician</p>
+                                    <p className="text-lg font-bold mt-2">{ticket.employee?.name || ticket.employee?.nom || 'Unassigned'}</p>
+                                    <p className="text-sm text-slate-600 dark:text-slate-300 mt-1">{ticket.employee?.email || ticket.employee?.mail || 'Waiting for assignment'}</p>
+                                    <div className="mt-4 flex items-center justify-between text-sm">
+                                        <span className="text-slate-500 dark:text-slate-400">Created</span>
+                                        <span className="font-medium text-slate-900 dark:text-slate-100">{new Date(ticket.created_at).toLocaleDateString()}</span>
+                                    </div>
+                                </div>
+
+                                <div className={`rounded-xl border p-4 ${ticket.sla_breached ? 'border-rose-200 dark:border-rose-900/40 bg-rose-50 dark:bg-rose-900/10' : 'border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-900/30'}`}>
+                                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">SLA Status</p>
+                                    <p className={`text-lg font-bold mt-2 capitalize ${ticket.sla_breached ? 'text-rose-600 dark:text-rose-400' : 'text-slate-900 dark:text-slate-100'}`}>
+                                        {ticket.sla_state || 'pending'}
+                                    </p>
+                                    <p className="text-sm text-slate-600 dark:text-slate-300 mt-1">
+                                        {ticket.sla_due_at
+                                            ? `Due ${new Date(ticket.sla_due_at).toLocaleString()}`
+                                            : 'SLA target not available'}
+                                    </p>
+                                </div>
+                            </div>
                             
                             <div className="space-y-6">
                                 {/* Workflow Progress */}
@@ -615,13 +727,26 @@ export function TicketTracking({ ticketId, onBack }) {
                             </div>
 
                             {ticket.image && (
-                                <div>
-                                    <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Attached Image</label>
-                                    <div className="flex items-start gap-3">
-                                        <img src={resolveTicketImageUrl(ticket.image)} alt="Attachment" className="rounded-lg max-h-48 w-full object-cover" />
+                                <div className="mt-6 rounded-xl border border-slate-200 dark:border-border-dark bg-white dark:bg-surface-dark p-4 shadow-sm">
+                                    <div className="flex items-center justify-between gap-3 mb-3">
+                                        <div>
+                                            <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block">Attached Image</label>
+                                            <p className="text-sm text-slate-500 dark:text-slate-400">Visible to both you and the technician.</p>
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <a
+                                                href={resolveTicketImageUrl(ticket.image)}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="px-3 py-2 border border-slate-200 dark:border-border-dark rounded-lg text-sm font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                                            >
+                                                Open
+                                            </a>
+                                            <button onClick={handleDeleteImage} className="px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold transition-colors">Delete Image</button>
+                                        </div>
                                     </div>
-                                    <div className="mt-3">
-                                        <button onClick={handleDeleteImage} className="px-3 py-2 bg-red-600 text-white rounded-lg text-sm">Delete Image</button>
+                                    <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-900/30">
+                                        <img src={resolveTicketImageUrl(ticket.image)} alt="Attachment" className="w-full max-h-80 object-contain bg-white dark:bg-slate-950" />
                                     </div>
                                 </div>
                             )}
@@ -633,22 +758,30 @@ export function TicketTracking({ ticketId, onBack }) {
                                 <span className="material-symbols-outlined text-primary">history</span> Activity Log
                             </h3>
                             <div className="space-y-4">
-                                <div className="flex gap-4">
-                                    <div className="flex flex-col items-center">
-                                        <div className="w-2.5 h-2.5 rounded-full mt-2 bg-primary"></div>
-                                    </div>
-                                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-5 flex-1 shadow-sm">
-                                        <div className="flex justify-between items-start mb-2">
-                                            <span className="font-bold">Ticket Created</span>
-                                            <span className="text-xs text-slate-500 dark:text-slate-400">
-                                                {new Date(ticket.created_at).toLocaleString()}
-                                            </span>
+                                {ticketTimeline.map((item, index) => (
+                                    <div key={item.key} className="flex gap-4">
+                                        <div className="flex flex-col items-center">
+                                            <div className={`w-2.5 h-2.5 rounded-full mt-2 ${item.active ? 'bg-primary' : 'bg-slate-300 dark:bg-slate-700'}`}></div>
+                                            {index !== ticketTimeline.length - 1 && (
+                                                <div className="w-px flex-1 min-h-12 bg-slate-200 dark:bg-slate-800"></div>
+                                            )}
                                         </div>
-                                        <p className="text-sm text-slate-600 dark:text-slate-300">
-                                            {ticket.titre}
-                                        </p>
+                                        <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-5 flex-1 shadow-sm">
+                                            <div className="flex justify-between items-start gap-4">
+                                                <div>
+                                                    <div className="flex items-center gap-2 mb-2">
+                                                        <span className="material-symbols-outlined text-primary text-lg">{item.icon}</span>
+                                                        <span className="font-bold">{item.label}</span>
+                                                    </div>
+                                                    <p className="text-sm text-slate-600 dark:text-slate-300">{item.detail}</p>
+                                                </div>
+                                                <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border ${item.active ? 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400' : 'bg-slate-50 dark:bg-slate-900/30 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400'}`}>
+                                                    {item.active ? 'Active' : 'Pending'}
+                                                </span>
+                                            </div>
+                                        </div>
                                     </div>
-                                </div>
+                                ))}
                             </div>
 
                             {/* Client Reply Area */}

@@ -6,9 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Models\Demande;
 use App\Models\Client;
 use App\Models\Machine;
+use App\Models\Log;
 use App\Models\User;
+use App\Models\Employee;
+use App\Events\TicketUpdated;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Laravel\Sanctum\PersonalAccessToken;
 
 class ClientController extends Controller
 {
@@ -26,7 +30,17 @@ class ClientController extends Controller
 
         $clientId = $client->id;
 
-        $demandes = Demande::where('id_client', $clientId)
+        $validated = $request->validate([
+            'per_page' => 'nullable|integer|min:1|max:100',
+            'search' => 'nullable|string|max:120',
+            'status' => 'nullable|string|max:50',
+        ]);
+
+        $perPage = (int) ($validated['per_page'] ?? 10);
+        $search = trim((string) ($validated['search'] ?? ''));
+        $status = $validated['status'] ?? null;
+
+        $demandesQuery = Demande::where('id_client', $clientId)
             ->select([
                 'id',
                 'titre',
@@ -38,9 +52,23 @@ class ClientController extends Controller
                 'rating_comment',
                 'created_at',
                 'image',
-            ])
+            ]);
+
+        if ($status) {
+            $demandesQuery->where('status', $status);
+        }
+
+        if ($search !== '') {
+            $demandesQuery->where(function ($query) use ($search) {
+                $query->where('titre', 'like', "%{$search}%")
+                    ->orWhere('description', 'like', "%{$search}%")
+                    ->orWhere('status', 'like', "%{$search}%");
+            });
+        }
+
+        $demandes = $demandesQuery
             ->latest('created_at')
-            ->paginate(10);
+            ->paginate($perPage);
 
         $counts = [
             'total'       => Demande::where('id_client', $clientId)->count(),
@@ -52,6 +80,7 @@ class ClientController extends Controller
         ];
 
         return response()->json([
+            'ok' => true,
             'demandes' => $demandes,
             'counts'   => $counts,
         ]);
@@ -75,6 +104,75 @@ class ClientController extends Controller
             ->get();
 
         return response()->json(['machines' => $machines]);
+    }
+
+    /**
+     * Stream client logs via Server-Sent Events (SSE) for real-time notifications.
+     */
+    public function streamLogs(Request $request)
+    {
+        $token = $request->query('token');
+        if (!$token) {
+            return response()->json(['error' => 'Missing token'], 401);
+        }
+
+        $accessToken = PersonalAccessToken::findToken($token);
+        if (!$accessToken) {
+            return response()->json(['error' => 'Invalid token'], 401);
+        }
+
+        $user = $accessToken->tokenable;
+        if (!$user || $user->role !== 'client') {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $client = Client::where('cin', $user->cin)->first();
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
+
+        $startFromId = (int) $request->query('last_id', 0);
+
+        return response()->stream(function () use ($client, $startFromId) {
+            @ini_set('zlib.output_compression', 0);
+            @ini_set('output_buffering', 'off');
+
+            $lastSentId = $startFromId;
+
+            while (true) {
+                if (connection_aborted()) {
+                    break;
+                }
+
+                $logsQuery = Log::where('client_id', $client->id)
+                    ->orderBy('id', 'asc')
+                    ->limit(50);
+
+                if ($lastSentId > 0) {
+                    $logsQuery->where('id', '>', $lastSentId);
+                }
+
+                $logs = $logsQuery->get();
+
+                if ($logs->isNotEmpty()) {
+                    $lastSentId = $logs->last()->id;
+                    echo "event: logs\n";
+                    echo 'data: ' . json_encode(['logs' => $logs]) . "\n\n";
+                } else {
+                    echo "event: ping\n";
+                    echo 'data: ' . json_encode(['type' => 'ping', 'time' => now()->toISOString()]) . "\n\n";
+                }
+
+                @ob_flush();
+                @flush();
+                sleep(3);
+            }
+        }, 200, [
+            'Content-Type' => 'text/event-stream',
+            'Cache-Control' => 'no-cache',
+            'Connection' => 'keep-alive',
+            'X-Accel-Buffering' => 'no',
+        ]);
     }
 
     /**
@@ -118,8 +216,16 @@ class ClientController extends Controller
             return response()->json(['error' => 'Machine ID or AnyDesk code required'], 422);
         }
 
-        // Check if client has insufficient funds
-        $hasInsufficientFunds = $client->money < 0;
+        // Check if client has insufficient funds for the chosen priority
+        $priorityFees = [
+            'low' => 10,
+            'medium' => 20,
+            'high' => 25,
+            'urgent' => 30,
+        ];
+        $priorityKey = strtolower((string) $request->priority);
+        $requiredFee = $priorityFees[$priorityKey] ?? 0;
+        $hasInsufficientFunds = $client->money < $requiredFee;
 
         $demande = Demande::create([
             'id_client'             => $clientId,
@@ -139,21 +245,13 @@ class ClientController extends Controller
             'created_at'            => now(),
         ]);
 
-        return response()->json([
-            'demande' => $demande,
-            'client_balance' => $client->money,
-            'insufficient_funds' => $hasInsufficientFunds,
-            'warning' => $hasInsufficientFunds 
-                ? 'Warning: Client has insufficient funds. Admin approval required to proceed.' 
-                : null,
-        ], 201);
         // If the client is in debt, create a simple Log entry for admins
         if ($hasInsufficientFunds) {
             try {
                 \App\Models\Log::create([
                     'demande_id' => $demande->id,
                     'client_id' => $clientId,
-                    'description' => 'Client created a ticket with insufficient funds: balance ' . $client->money,
+                    'description' => 'Client created a ticket with insufficient funds: balance ' . $client->money . ', required ' . $requiredFee,
                     'status' => 'insufficient_funds',
                     'created_at_demande' => now(),
                 ]);
@@ -161,6 +259,15 @@ class ClientController extends Controller
                 // swallow: logging failure should not affect client flow
             }
         }
+
+        return response()->json([
+            'demande' => $demande,
+            'client_balance' => $client->money,
+            'insufficient_funds' => $hasInsufficientFunds,
+            'warning' => $hasInsufficientFunds
+                ? 'Warning: Client has insufficient funds. Admin approval required to proceed.'
+                : null,
+        ], 201);
     }
 
     /**
@@ -180,9 +287,10 @@ class ClientController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        return response()->json(
-            $ticket->load('machine', 'employee', 'client')
-        );
+        return response()->json([
+            'ok' => true,
+            'ticket' => $ticket->load('machine', 'employee', 'client'),
+        ]);
     }
 
     /**
@@ -238,15 +346,19 @@ class ClientController extends Controller
 
         // Recalculate employee performance if ticket is assigned
         if ($ticket->id_employee) {
-            $employee = User::find($ticket->id_employee);
-            if ($employee && method_exists($employee, 'recalculatePerformance')) {
+            $employee = Employee::find($ticket->id_employee);
+            if ($employee) {
                 $employee->recalculatePerformance();
             }
         }
 
+        $updatedTicket = $ticket->fresh()->load(['client', 'employee', 'machine']);
+        broadcast(new TicketUpdated($updatedTicket))->toOthers();
+
         return response()->json([
+            'ok' => true,
             'message' => 'Rating submitted successfully',
-            'ticket' => $ticket->fresh()->load(['client', 'employee', 'machine']),
+            'ticket' => $updatedTicket,
         ], 200);
     }
 
@@ -266,7 +378,6 @@ class ClientController extends Controller
 
         return response()->json(['message' => 'Ticket deleted successfully']);
     }
-}
     /**
      * Get recent logs for authenticated client (used to sync balance changes)
      */
@@ -279,12 +390,42 @@ class ClientController extends Controller
             return response()->json(['error' => 'Client not found'], 404);
         }
 
-        $logs = \App\Models\Log::where('client_id', $client->id)
-            ->orderBy('created_at', 'desc')
-            ->limit(50)
-            ->get();
+        $validated = $request->validate([
+            'per_page' => 'nullable|integer|min:1|max:200',
+            'search' => 'nullable|string|max:120',
+            'status' => 'nullable|string|max:50',
+        ]);
 
-        return response()->json(['logs' => $logs]);
+        $perPage = (int) ($validated['per_page'] ?? 50);
+        $search = trim((string) ($validated['search'] ?? ''));
+        $status = $validated['status'] ?? null;
+
+        $logsQuery = \App\Models\Log::where('client_id', $client->id)
+            ->orderBy('created_at', 'desc');
+
+        if ($status) {
+            $logsQuery->where('status', $status);
+        }
+
+        if ($search !== '') {
+            $logsQuery->where(function ($query) use ($search) {
+                $query->where('description', 'like', "%{$search}%")
+                    ->orWhere('status', 'like', "%{$search}%")
+                    ->orWhere('software_name', 'like', "%{$search}%");
+            });
+        }
+
+        $logs = $logsQuery->paginate($perPage);
+
+        return response()->json([
+            'ok' => true,
+            'logs' => $logs->items(),
+            'pagination' => [
+                'current_page' => $logs->currentPage(),
+                'total_pages' => $logs->lastPage(),
+                'total_logs' => $logs->total(),
+            ],
+        ]);
     }
 
     /**
@@ -305,7 +446,11 @@ class ClientController extends Controller
         }
 
         $log->update(['is_read' => true]);
-        return response()->json(['message' => 'Marked as read', 'log' => $log]);
+        return response()->json([
+            'ok' => true,
+            'message' => 'Marked as read',
+            'log' => $log,
+        ]);
     }
 
     /**
@@ -344,3 +489,4 @@ class ClientController extends Controller
             return response()->json(['error' => 'Failed to delete image: ' . $e->getMessage()], 500);
         }
     }
+}

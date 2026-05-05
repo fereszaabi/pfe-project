@@ -24,12 +24,17 @@ class Message extends Model
         'read_at',
         'created_at',
         'ticket_id',
+        'channel',
+        'external_message_id',
+        'external_user_id',
+        'channel_metadata',
     ];
 
     protected $casts = [
         'created_at' => 'datetime',
         'read_at' => 'datetime',
         'is_read' => 'boolean',
+        'channel_metadata' => 'json',
     ];
 
     /**
@@ -46,6 +51,22 @@ class Message extends Model
     public function demande()
     {
         return $this->belongsTo(Demande::class, 'ticket_id');
+    }
+
+    /**
+     * Get webhook events for this message
+     */
+    public function webhooks()
+    {
+        return $this->hasMany(ChannelWebhook::class);
+    }
+
+    /**
+     * Get the channel this message came from
+     */
+    public function channelInfo()
+    {
+        return CommunicationChannel::where('name', $this->channel)->first();
     }
 
     /**
@@ -123,6 +144,24 @@ class Message extends Model
     {
         $sender = $this->sender();
         $recipient = $this->recipient();
+
+        $formatParty = function ($party) {
+            if (!$party) {
+                return null;
+            }
+
+            $name = $party->name
+                ?? trim(($party->prenom ?? '') . ' ' . ($party->nom ?? ''))
+                ?? $party->nom
+                ?? $party->prenom
+                ?? 'Unknown';
+
+            return [
+                'id' => $party->id,
+                'name' => $name,
+                'email' => $party->email ?? $party->mail ?? null,
+            ];
+        };
         
         return [
             'id' => $this->id,
@@ -132,19 +171,14 @@ class Message extends Model
             'sender_type' => $this->sender_type,
             'recipient_id' => $this->recipient_id,
             'recipient_type' => $this->recipient_type,
-            'sender' => $sender ? [
-                'id' => $sender->id,
-                'name' => $sender->name,
-                'email' => $sender->email ?? $sender->mail ?? null,
-            ] : null,
-            'recipient' => $recipient ? [
-                'id' => $recipient->id,
-                'name' => $recipient->name,
-                'email' => $recipient->email ?? $recipient->mail ?? null,
-            ] : null,
+            'sender' => $formatParty($sender),
+            'recipient' => $formatParty($recipient),
             'message' => $this->message,
             'is_read' => $this->is_read,
             'read_at' => $this->read_at,
+            'channel' => $this->channel,
+            'channel_metadata' => $this->channel_metadata,
+            'external_message_id' => $this->external_message_id,
             'created_at' => $this->created_at,
         ];
     }

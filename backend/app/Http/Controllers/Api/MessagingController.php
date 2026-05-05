@@ -8,6 +8,7 @@ use App\Models\Message;
 use App\Models\Conversation;
 use App\Models\User;
 use Carbon\Carbon;
+use App\Events\TicketMessageCreated;
 
 class MessagingController extends Controller
 {
@@ -20,6 +21,14 @@ class MessagingController extends Controller
                 ->orWhere('cin', $user->cin)
                 ->first();
 
+            if (!$employee) {
+                return [
+                    'role' => $role,
+                    'type' => 'user',
+                    'id' => $user->id,
+                ];
+            }
+
             return [
                 'role' => 'employee',
                 'type' => 'employee',
@@ -31,6 +40,14 @@ class MessagingController extends Controller
             $client = \App\Models\Client::where('mail', $user->email)
                 ->orWhere('cin', $user->cin)
                 ->first();
+
+            if (!$client) {
+                return [
+                    'role' => $role,
+                    'type' => 'user',
+                    'id' => $user->id,
+                ];
+            }
 
             return [
                 'role' => 'client',
@@ -46,33 +63,76 @@ class MessagingController extends Controller
         ];
     }
 
+    private function resolveParticipant(string $type, int $id)
+    {
+        return match ($type) {
+            'employee' => \App\Models\Employee::find($id),
+            'client' => \App\Models\Client::find($id),
+            'user' => User::find($id),
+            default => User::find($id),
+        };
+    }
+
+    private function formatParticipant($participant, string $type): ?array
+    {
+        if (!$participant) {
+            return null;
+        }
+
+        $name = $participant->name
+            ?? trim(($participant->prenom ?? '') . ' ' . ($participant->nom ?? ''))
+            ?? $participant->nom
+            ?? $participant->prenom
+            ?? 'Unknown';
+
+        $email = $participant->email ?? $participant->mail ?? null;
+        $role = $participant->role ?? $type;
+
+        return [
+            'id' => $participant->id,
+            'name' => $name,
+            'email' => $email,
+            'role' => $role,
+            'type' => $type,
+        ];
+    }
+
     /**
      * Get all conversations for the authenticated user
      */
     public function conversations(Request $request)
     {
-        $userId = $request->user()->id;
+        $actor = $this->resolveActorFromUser($request->user());
+        $actorId = $actor['id'];
+        $actorType = $actor['type'];
 
-        $conversations = Conversation::where(function ($query) use ($userId) {
-            $query->where('sender_id', $userId)
-                  ->orWhere('recipient_id', $userId);
+        $conversations = Conversation::where(function ($query) use ($actorId, $actorType) {
+            $query->where(function ($nested) use ($actorId, $actorType) {
+                $nested->where('sender_id', $actorId)
+                    ->where('sender_type', $actorType);
+            })->orWhere(function ($nested) use ($actorId, $actorType) {
+                $nested->where('recipient_id', $actorId)
+                    ->where('recipient_type', $actorType);
+            });
         })
         ->with(['sender', 'recipient', 'latestMessage'])
         ->orderBy('updated_at', 'desc')
         ->paginate(20);
 
-        $conversationItems = collect($conversations->items())->map(function ($conv) use ($userId) {
-            $otherParticipant = $conv->getOtherParticipant($userId);
-            $unreadCount = $conv->unreadCount($userId);
+        $conversationItems = collect($conversations->items())->map(function ($conv) use ($actorId, $actorType) {
+            $isSender = $conv->sender_id === $actorId && $conv->sender_type === $actorType;
+            $otherId = $isSender ? $conv->recipient_id : $conv->sender_id;
+            $otherType = $isSender ? $conv->recipient_type : $conv->sender_type;
+            $otherParticipant = $this->resolveParticipant($otherType, $otherId);
+            $unreadCount = Message::where('conversation_id', $conv->id)
+                ->where('recipient_id', $actorId)
+                ->where('recipient_type', $actorType)
+                ->where('is_read', false)
+                ->count();
 
             return [
                 'id' => $conv->id,
-                'other_participant' => [
-                    'id' => $otherParticipant->id,
-                    'name' => $otherParticipant->name,
-                    'email' => $otherParticipant->email,
-                    'role' => $otherParticipant->role,
-                ],
+                'other_participant' => $this->formatParticipant($otherParticipant, $otherType),
                 'last_message' => $conv->latestMessage ? [
                     'message' => $conv->latestMessage->message,
                     'sender_id' => $conv->latestMessage->sender_id,
@@ -94,7 +154,9 @@ class MessagingController extends Controller
      */
     public function getMessages(Request $request, $conversationId)
     {
-        $userId = $request->user()->id;
+        $actor = $this->resolveActorFromUser($request->user());
+        $actorId = $actor['id'];
+        $actorType = $actor['type'];
         $conversation = Conversation::find($conversationId);
 
         if (!$conversation) {
@@ -102,13 +164,17 @@ class MessagingController extends Controller
         }
 
         // Verify user is part of this conversation
-        if ($conversation->sender_id !== $userId && $conversation->recipient_id !== $userId) {
+        $isParticipant =
+            ($conversation->sender_id === $actorId && $conversation->sender_type === $actorType) ||
+            ($conversation->recipient_id === $actorId && $conversation->recipient_type === $actorType);
+        if (!$isParticipant) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 
         // Mark all messages as read
         Message::where('conversation_id', $conversationId)
-            ->where('recipient_id', $userId)
+            ->where('recipient_id', $actorId)
+            ->where('recipient_type', $actorType)
             ->where('is_read', false)
             ->update([
                 'is_read' => true,
@@ -123,13 +189,14 @@ class MessagingController extends Controller
             return $msg->formatForResponse();
         });
 
+        $isSender = $conversation->sender_id === $actorId && $conversation->sender_type === $actorType;
+        $otherId = $isSender ? $conversation->recipient_id : $conversation->sender_id;
+        $otherType = $isSender ? $conversation->recipient_type : $conversation->sender_type;
+        $otherParticipant = $this->resolveParticipant($otherType, $otherId);
+
         return response()->json([
             'conversation_id' => $conversationId,
-            'other_participant' => [
-                'id' => $conversation->getOtherParticipant($userId)->id,
-                'name' => $conversation->getOtherParticipant($userId)->name,
-                'email' => $conversation->getOtherParticipant($userId)->email,
-            ],
+            'other_participant' => $this->formatParticipant($otherParticipant, $otherType),
             'messages' => $messageItems,
             'pagination' => [
                 'current_page' => $messages->currentPage(),
@@ -216,6 +283,21 @@ class MessagingController extends Controller
                 ? $recipientType
                 : ($recipient->role ?? $recipientType);
 
+            $recipientUserId = null;
+            if ($recipientType === 'employee') {
+                $recipientUser = User::where('email', $recipient->mail ?? $recipient->email)
+                    ->orWhere('cin', $recipient->cin)
+                    ->first();
+                $recipientUserId = $recipientUser?->id;
+            } elseif ($recipientType === 'client') {
+                $recipientUser = User::where('email', $recipient->mail ?? $recipient->email)
+                    ->orWhere('cin', $recipient->cin)
+                    ->first();
+                $recipientUserId = $recipientUser?->id;
+            } elseif ($recipientType === 'user') {
+                $recipientUserId = $recipient->id;
+            }
+
             \Log::info('Recipient found', [
                 'recipient_id' => $recipientId,
                 'recipient_role' => $recipientRole,
@@ -286,6 +368,16 @@ class MessagingController extends Controller
             // Update conversation last message time
             $conversation->update(['updated_at' => Carbon::now()]);
 
+            if ($ticketId) {
+                broadcast(new TicketMessageCreated(
+                    $message,
+                    (int) $ticketId,
+                    $recipientType,
+                    (int) $recipientId,
+                    $recipientUserId
+                ))->toOthers();
+            }
+
             \Log::info('Message created successfully', [
                 'message_id' => $message->id,
                 'sender_id' => $senderId,
@@ -314,30 +406,31 @@ class MessagingController extends Controller
     public function startConversation(Request $request, $userId)
     {
         $currentUser = $request->user();
-        $currentUserId = $currentUser->id;
-
-        // Determine current user type
-        $currentUserClass = get_class($currentUser);
-        if (strpos($currentUserClass, 'Employee') !== false) {
-            $currentUserType = 'employee';
-        } elseif (strpos($currentUserClass, 'Client') !== false) {
-            $currentUserType = 'client';
-        } else {
-            $currentUserType = 'user';
-        }
+        $currentActor = $this->resolveActorFromUser($currentUser);
+        $currentUserId = $currentActor['id'];
+        $currentUserType = $currentActor['type'];
 
         // Try to find target user in all tables
-        $targetUser = User::find($userId);
-        $targetUserType = 'user';
-        
-        if (!$targetUser) {
+        $requestedType = $request->query('type') ?? $request->input('type');
+        $targetUser = null;
+        $targetUserType = null;
+
+        if ($requestedType) {
+            $targetUserType = $requestedType;
+            $targetUser = $this->resolveParticipant($requestedType, (int) $userId);
+        } else {
             $targetUser = \App\Models\Employee::find($userId);
-            $targetUserType = 'employee';
-        }
-        
-        if (!$targetUser) {
-            $targetUser = \App\Models\Client::find($userId);
-            $targetUserType = 'client';
+            $targetUserType = $targetUser ? 'employee' : null;
+
+            if (!$targetUser) {
+                $targetUser = \App\Models\Client::find($userId);
+                $targetUserType = $targetUser ? 'client' : null;
+            }
+
+            if (!$targetUser) {
+                $targetUser = User::find($userId);
+                $targetUserType = $targetUser ? 'user' : null;
+            }
         }
 
         if (!$targetUser) {
@@ -362,7 +455,7 @@ class MessagingController extends Controller
         }
 
         // Prevent conversation with self
-        if ($currentUserId === $userId) {
+        if ($currentUserId === (int) $userId && $currentUserType === $targetUserType) {
             return response()->json(['message' => 'Cannot message yourself'], 422);
         }
 
@@ -370,13 +463,14 @@ class MessagingController extends Controller
         $conversation = Conversation::findOrCreateBetweenWithTypes(
             $currentUserId, 
             $currentUserType, 
-            $userId, 
+            (int) $userId, 
             $targetUserType
         );
 
         // Mark messages as read
         Message::where('conversation_id', $conversation->id)
             ->where('recipient_id', $currentUserId)
+            ->where('recipient_type', $currentUserType)
             ->where('is_read', false)
             ->update([
                 'is_read' => true,
@@ -390,12 +484,7 @@ class MessagingController extends Controller
 
         return response()->json([
             'conversation_id' => $conversation->id,
-            'other_participant' => [
-                'id' => $targetUser->id,
-                'name' => $targetUser->name,
-                'email' => $targetUser->email ?? $targetUser->mail ?? null,
-                'role' => $targetUser->role,
-            ],
+            'other_participant' => $this->formatParticipant($targetUser, $targetUserType),
             'messages' => $messages->map(function ($msg) {
                 return $msg->formatForResponse();
             }),
@@ -454,18 +543,17 @@ class MessagingController extends Controller
             ]);
 
         // Get the other party (client or employee) - include email field
-        $otherParty = $userRole === 'employee' 
-            ? $ticket->client 
-            : \App\Models\Employee::find($ticket->id_employee);
+        $otherParty = $userRole === 'employee'
+            ? $ticket->client
+            : ($userRole === 'client'
+                ? \App\Models\Employee::find($ticket->id_employee)
+                : ($ticket->employee ?? $ticket->client));
 
-        $otherPartyData = null;
-        if ($otherParty) {
-            $otherPartyData = [
-                'id' => $otherParty->id,
-                'name' => $otherParty->name,
-                'email' => $otherParty->email ?? $otherParty->mail ?? null,
-            ];
-        }
+        $otherPartyType = $userRole === 'employee'
+            ? 'client'
+            : ($userRole === 'client' ? 'employee' : ($ticket->employee ? 'employee' : 'client'));
+
+        $otherPartyData = $this->formatParticipant($otherParty, $otherPartyType);
 
         return response()->json([
             'ticket_id' => $ticketId,
@@ -485,37 +573,47 @@ class MessagingController extends Controller
      */
     public function getAvailableEmployees(Request $request)
     {
-        $currentUserId = $request->user()->id;
+        $currentActor = $this->resolveActorFromUser($request->user());
+        $currentActorId = $currentActor['id'];
 
-        $employees = User::where('role', 'employee')
-            ->where('id', '!=', $currentUserId)
-            ->where('performance_status', 'active')
-            ->select('id', 'name', 'email', 'role', 'current_workload', 'avg_rating')
-            ->orderBy('name')
-            ->get();
+        $employees = \App\Models\Employee::orderBy('nom')
+            ->get()
+            ->filter(function ($emp) use ($currentActorId, $currentActor) {
+                if ($currentActor['type'] !== 'employee') {
+                    return true;
+                }
 
-        // Also include admin
+                return $emp->id !== $currentActorId;
+            })
+            ->values();
+
         $admin = User::where('role', 'admin')
-            ->where('id', '!=', $currentUserId)
             ->select('id', 'name', 'email', 'role')
             ->first();
 
-        $result = $employees;
+        $available = $employees->map(function ($emp) {
+            $name = trim(($emp->prenom ?? '') . ' ' . ($emp->nom ?? '')) ?: ($emp->nom ?? 'Employee');
+            return [
+                'id' => $emp->id,
+                'name' => $name,
+                'email' => $emp->mail ?? null,
+                'role' => 'employee',
+                'type' => 'employee',
+            ];
+        });
+
         if ($admin) {
-            $result->push($admin);
+            $available->push([
+                'id' => $admin->id,
+                'name' => $admin->name,
+                'email' => $admin->email,
+                'role' => $admin->role,
+                'type' => 'user',
+            ]);
         }
 
         return response()->json([
-            'available_employees' => $result->map(function ($emp) {
-                return [
-                    'id' => $emp->id,
-                    'name' => $emp->name,
-                    'email' => $emp->email,
-                    'role' => $emp->role,
-                    'current_workload' => $emp->current_workload ?? 0,
-                    'avg_rating' => (float) ($emp->avg_rating ?? 0),
-                ];
-            }),
+            'available_employees' => $available,
         ]);
     }
 
@@ -562,14 +660,21 @@ class MessagingController extends Controller
             'conversation_id' => 'nullable|exists:conversations,id',
         ]);
 
-        $userId = $request->user()->id;
+        $actor = $this->resolveActorFromUser($request->user());
+        $userId = $actor['id'];
+        $userType = $actor['type'];
         $query = $request->query;
         $conversationId = $request->conversation_id;
 
-        $queryBuilder = Message::whereRaw(
-            '(sender_id = ? OR recipient_id = ?)',
-            [$userId, $userId]
-        )->where('message', 'like', '%' . $query . '%');
+        $queryBuilder = Message::where(function ($builder) use ($userId, $userType) {
+            $builder->where(function ($nested) use ($userId, $userType) {
+                $nested->where('sender_id', $userId)
+                    ->where('sender_type', $userType);
+            })->orWhere(function ($nested) use ($userId, $userType) {
+                $nested->where('recipient_id', $userId)
+                    ->where('recipient_type', $userType);
+            });
+        })->where('message', 'like', '%' . $query . '%');
 
         if ($conversationId) {
             $queryBuilder->where('conversation_id', $conversationId);
@@ -600,7 +705,8 @@ class MessagingController extends Controller
         }
 
         // Only sender can delete
-        if ($message->sender_id !== $request->user()->id) {
+        $actor = $this->resolveActorFromUser($request->user());
+        if ($message->sender_id !== $actor['id'] || $message->sender_type !== $actor['type']) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 

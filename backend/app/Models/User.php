@@ -4,6 +4,7 @@ namespace App\Models;
 
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
@@ -51,7 +52,6 @@ class User extends Authenticatable
      */
     protected $casts = [
         'email_verified_at' => 'datetime',
-        'password' => 'hashed',
         'tickets_completed' => 'integer',
         'avg_rating' => 'decimal:2',
         'avg_resolution_hours' => 'decimal:2',
@@ -199,5 +199,145 @@ class User extends Authenticatable
                   ->where('recipient_id', $this->id);
             });
         })->first();
+    }
+
+    /**
+     * RBAC: Get roles assigned to this user
+     */
+    public function roles(): BelongsToMany
+    {
+        return $this->belongsToMany(Role::class, 'role_user');
+    }
+
+    /**
+     * RBAC: Get individual permission overrides
+     */
+    public function permissions(): BelongsToMany
+    {
+        return $this->belongsToMany(Permission::class, 'user_permission');
+    }
+
+    /**
+     * RBAC: Check if user has permission
+     */
+    public function hasPermission(string $permission): bool
+    {
+        // Check individual overrides first
+        if ($this->permissions()->where('name', $permission)->exists()) {
+            return true;
+        }
+
+        // Check role-based permissions
+        return $this->roles()
+            ->whereHas('permissions', function ($query) use ($permission) {
+                $query->where('name', $permission);
+            })
+            ->exists();
+    }
+
+    /**
+     * RBAC: Check if user has any of the given permissions
+     */
+    public function hasAnyPermission(array $permissions): bool
+    {
+        foreach ($permissions as $permission) {
+            if ($this->hasPermission($permission)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * RBAC: Check if user has all given permissions
+     */
+    public function hasAllPermissions(array $permissions): bool
+    {
+        foreach ($permissions as $permission) {
+            if (!$this->hasPermission($permission)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * RBAC: Check if user has role
+     */
+    public function hasRole(string $role): bool
+    {
+        return $this->roles()->where('name', $role)->exists();
+    }
+
+    /**
+     * RBAC: Check if user has any of the given roles
+     */
+    public function hasAnyRole(array $roles): bool
+    {
+        return $this->roles()->whereIn('name', $roles)->exists();
+    }
+
+    /**
+     * RBAC: Assign role to user
+     */
+    public function assignRole(string $roleName): void
+    {
+        $role = Role::where('name', $roleName)->firstOrFail();
+        $this->roles()->syncWithoutDetaching($role->id);
+    }
+
+    /**
+     * RBAC: Remove role from user
+     */
+    public function removeRole(string $roleName): void
+    {
+        $role = Role::where('name', $roleName)->first();
+        if ($role) {
+            $this->roles()->detach($role->id);
+        }
+    }
+
+    /**
+     * RBAC: Grant individual permission override
+     */
+    public function grantPermission(string $permissionName): void
+    {
+        $permission = Permission::where('name', $permissionName)->firstOrFail();
+        $this->permissions()->syncWithoutDetaching($permission->id);
+    }
+
+    /**
+     * RBAC: Revoke individual permission override
+     */
+    public function revokePermission(string $permissionName): void
+    {
+        $permission = Permission::where('name', $permissionName)->first();
+        if ($permission) {
+            $this->permissions()->detach($permission->id);
+        }
+    }
+
+    /**
+     * Get audit logs for this user
+     */
+    public function auditLogs()
+    {
+        return $this->hasMany(AuditLog::class, 'user_id')->orderBy('created_at', 'desc');
+    }
+
+    /**
+     * Get SSO accounts linked to this user
+     */
+    public function ssoAccounts()
+    {
+        return $this->hasMany(SsoUser::class);
+    }
+
+    /**
+     * Get webhooks created by this user
+     */
+    public function webhooks()
+    {
+        return $this->hasMany(Webhook::class);
     }
 }
