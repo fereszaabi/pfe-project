@@ -6,6 +6,7 @@ import { getEcho } from '../../services/realtime';
 export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, activeView }) {
     const promptedRatingTicketsRef = useRef(new Set());
     const supportMessagesEndRef = useRef(null);
+    const ticketsSectionRef = useRef(null);
     const isFetchingTicketsRef = useRef(false);
     const botRequestAbortRef = useRef(null); // For cancelling pending bot requests
     const botTimeoutIdRef = useRef(null); // For tracking request timeout
@@ -51,6 +52,9 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [unreadCount, setUnreadCount] = useState(0);
     const [showNotifications, setShowNotifications] = useState(false);
     const [clientActorId, setClientActorId] = useState(null);
+    const [ticketNotice, setTicketNotice] = useState(null);
+    const [pendingTicketSubmission, setPendingTicketSubmission] = useState(null);
+    const [isSubmittingTicket, setIsSubmittingTicket] = useState(false);
     const [newTicket, setNewTicket] = useState({
         titre: '',
         description: '',
@@ -75,25 +79,32 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         setSubmitError('');
     };
 
-    useEffect(() => {
-        let isMounted = true;
-
-        getClientProfile()
-            .then((profileData) => {
-                const actorId = profileData?.profile?.id ?? profileData?.id ?? null;
-                if (isMounted && actorId) {
-                    setClientActorId(actorId);
-                }
-            })
-            .catch(() => {});
-
-        return () => {
-            isMounted = false;
+    const normalizeTicketsResponse = (data) => {
+        const demandesPayload = data?.demandes?.data ?? data?.demandes ?? data?.data ?? [];
+        const totalPages = data?.demandes?.last_page ?? data?.pagination?.total_pages ?? data?.last_page ?? 1;
+        return {
+            tickets: Array.isArray(demandesPayload) ? demandesPayload : [],
+            totalPages,
         };
-    }, []);
+    };
+
+    const fetchTicketsList = async (options = {}) => {
+        const params = {
+            per_page: 10,
+            page: ticketPage,
+            search: ticketSearch.trim(),
+            ...options,
+        };
+        const data = await getClientTickets(params);
+        const { tickets: nextTickets, totalPages } = normalizeTicketsResponse(data);
+        setTickets(nextTickets);
+        setTicketTotalPages(totalPages);
+        return { tickets: nextTickets, totalPages };
+    };
 
     useEffect(() => {
         let isMounted = true;
+        let channel = null;
 
         const fetchTickets = async (showLoader = false) => {
             if (isFetchingTicketsRef.current) return;
@@ -109,9 +120,8 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     search: ticketSearch.trim(),
                 });
                 if (isMounted) {
-                    const demandes = data.demandes?.data ?? data.demandes ?? [];
-                    const totalPages = data.demandes?.last_page ?? data.pagination?.total_pages ?? 1;
-                    setTickets(demandes);
+                    const { tickets: nextTickets, totalPages } = normalizeTicketsResponse(data);
+                    setTickets(nextTickets);
                     setTicketTotalPages(totalPages);
                 }
             } catch (_) {
@@ -121,7 +131,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 }
             } finally {
                 isFetchingTicketsRef.current = false;
-                if (showLoader && isMounted) {
+                if (showLoader) {
                     setLoadingTickets(false);
                 }
             }
@@ -129,47 +139,42 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
         fetchTickets(true);
 
-        if (!user?.id) {
-            return () => {
-                isMounted = false;
-            };
-        }
-
         try {
-            const echo = getEcho();
-            const channel = echo.private(`user.user.${user.id}`);
+            if (user?.id) {
+                const echo = getEcho();
+                channel = echo.private(`user.user.${user.id}`);
 
-            channel.listen('.ticket.updated', (event) => {
-                const updatedTicket = event?.ticket;
-                if (!updatedTicket?.id) return;
+                channel.listen('.ticket.updated', (event) => {
+                    const updatedTicket = event?.ticket;
+                    if (!updatedTicket?.id) return;
 
-                setTickets((prev) => {
-                    const exists = prev.some((ticket) => ticket.id === updatedTicket.id);
-                    if (exists) {
-                        return prev.map((ticket) =>
-                            ticket.id === updatedTicket.id ? { ...ticket, ...updatedTicket } : ticket
-                        );
-                    }
+                    setTickets((prev) => {
+                        const exists = prev.some((ticket) => ticket.id === updatedTicket.id);
+                        if (exists) {
+                            return prev.map((ticket) =>
+                                ticket.id === updatedTicket.id ? { ...ticket, ...updatedTicket } : ticket
+                            );
+                        }
 
-                    return [updatedTicket, ...prev];
+                        return [updatedTicket, ...prev];
+                    });
                 });
-            });
-
-            return () => {
-                isMounted = false;
-                try {
-                    echo.leave(`user.user.${user.id}`);
-                } catch (e) {
-                    // ignore cleanup errors
-                }
-            };
+            }
         } catch (err) {
             // Realtime connection failed, but dashboard should still work
             console.warn('Realtime connection failed:', err);
-            return () => {
-                isMounted = false;
-            };
         }
+
+        return () => {
+            isMounted = false;
+            if (channel) {
+                try {
+                    channel.unsubscribe();
+                } catch (e) {
+                    // ignore cleanup errors
+                }
+            }
+        };
     }, [user?.id, ticketPage, ticketSearch]);
 
     // Real-time client logs (SSE) with polling fallback for notifications
@@ -395,6 +400,16 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         }
     };
 
+    const closeTicketNotice = () => {
+        setTicketNotice(null);
+    };
+
+    const scrollToTickets = () => {
+        window.requestAnimationFrame(() => {
+            ticketsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    };
+
     useEffect(() => {
         if (!showSupportChat) return;
 
@@ -497,47 +512,115 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         if (file) setNewTicket({ ...newTicket, image: file });
     };
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
+    const buildTicketFormData = (ticketData, useNewMachine) => {
+        const fd = new FormData();
+        fd.append('titre', ticketData.titre);
+        fd.append('description', ticketData.description);
+        if (useNewMachine) {
+            fd.append('code_anydesk', ticketData.code_anydesk);
+        } else {
+            fd.append('machine_id', ticketData.machine_id);
+        }
+        fd.append('priority', ticketData.priority);
+        if (ticketData.image) fd.append('image', ticketData.image);
+        return fd;
+    };
+
+    const submitTicket = async (ticketData, allowLowBalance = false, useNewMachine = createNewMachine) => {
         setSubmitError('');
 
         // Validate machine selection
-        if (!createNewMachine && !newTicket.machine_id) {
+        if (!useNewMachine && !ticketData.machine_id) {
             setSubmitError('Please select an existing machine or create a new one');
             return;
         }
-        if (createNewMachine && !newTicket.code_anydesk.trim()) {
+        if (useNewMachine && !ticketData.code_anydesk.trim()) {
             setSubmitError('Please enter the AnyDesk code for the new machine');
             return;
         }
 
-        const fd = new FormData();
-        fd.append('titre', newTicket.titre);
-        fd.append('description', newTicket.description);
-        if (createNewMachine) {
-            fd.append('code_anydesk', newTicket.code_anydesk);
-        } else {
-            fd.append('machine_id', newTicket.machine_id);
-        }
-        fd.append('priority', newTicket.priority);
-        if (newTicket.image) fd.append('image', newTicket.image);
-        try {
-            await createTicket(fd);
-            const data = await getClientTickets({ per_page: 10 });
-            setTickets(data.demandes?.data ?? data.demandes ?? []);
-            setNewTicket({ titre: '', description: '', machine_id: '', code_anydesk: '', priority: 'low', image: null });
-            setCreateNewMachine(false);
-            setShowCreateTicket(false);
+        const fee = getSelectedPriorityCost(ticketData.priority);
+        const lowBalance = Number(clientBalance) < fee;
 
-            const profileData = await getClientProfile().catch(() => null);
-            const refreshedBalance = Number(profileData?.profile?.money ?? profileData?.money ?? NaN);
+        if (lowBalance && !allowLowBalance) {
+            setPendingTicketSubmission({ ...ticketData, useNewMachine });
+            setTicketNotice({
+                title: 'Insufficient funds',
+                message: 'Your ticket can still be submitted. Please pay within 7 days and an admin will be notified.',
+                deadline: '7 days',
+                confirmLabel: 'Submit anyway',
+            });
+            return;
+        }
+
+        setIsSubmittingTicket(true);
+        setShowCreateTicket(false);
+        setTicketNotice({
+            title: 'Creating ticket',
+            message: 'Your ticket is being created. Please wait...',
+            deadline: null,
+            processing: true,
+        });
+
+        const fd = buildTicketFormData(ticketData, useNewMachine);
+        try {
+            const response = await createTicket(fd);
+            const refreshedBalance = Number(response?.client_balance ?? NaN);
             if (!Number.isNaN(refreshedBalance)) {
                 setClientBalance(refreshedBalance);
             }
+
+            if (response?.insufficient_funds) {
+                setTicketNotice({
+                    title: 'Insufficient funds',
+                    message: response?.warning || 'Your ticket was submitted. Please pay within 7 days. An admin has been notified.',
+                    deadline: response?.payment_deadline || '7 days',
+                });
+            }
+
+            const machineData = await getMachines().catch(() => null);
+            if (Array.isArray(machineData?.machines)) {
+                setMachines(machineData.machines);
+            }
+
+            const profileData = await getClientProfile().catch(() => null);
+            const profileBalance = Number(profileData?.profile?.money ?? profileData?.money ?? NaN);
+            if (!Number.isNaN(profileBalance)) {
+                setClientBalance(profileBalance);
+            }
+
+            const { tickets: fetchedTickets } = await fetchTicketsList({ page: 1, search: '' });
+            const createdTicket = response?.demande;
+            if (createdTicket?.id) {
+                setTickets((prev) => {
+                    const withoutDuplicate = prev.filter((ticket) => ticket.id !== createdTicket.id);
+                    return [createdTicket, ...withoutDuplicate];
+                });
+            } else {
+                setTickets(fetchedTickets);
+            }
+            setTicketPage(1);
+            setTicketSearch('');
+            setNewTicket({ titre: '', description: '', machine_id: '', code_anydesk: '', priority: 'low', image: null });
+            setCreateNewMachine(false);
+            setShowCreateTicket(false);
+            scrollToTickets();
+
+            setTicketNotice({
+                title: response?.insufficient_funds ? 'Ticket submitted' : 'Ticket submitted',
+                message: response?.insufficient_funds
+                    ? response?.warning || 'Your ticket was submitted. Please pay within 7 days. An admin has been notified.'
+                    : 'Your ticket has been submitted successfully.',
+                deadline: response?.payment_deadline || null,
+                processing: false,
+                confirmLabel: 'Okay',
+            });
         } catch (err) {
             if (err?.message === 'Unauthenticated.') {
                 setSubmitError('Session expired. Please sign in again.');
                 await onLogout?.();
+                setTicketNotice(null);
+                setShowCreateTicket(true);
                 return;
             }
 
@@ -545,7 +628,24 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 ? Object.values(err.errors).flat().join(' ')
                 : err?.message || 'Failed to submit ticket.';
             setSubmitError(msg);
+            setTicketNotice(null);
+            setShowCreateTicket(true);
+        } finally {
+            setIsSubmittingTicket(false);
         }
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        await submitTicket(newTicket, false, createNewMachine);
+    };
+
+    const handleConfirmLowBalanceSubmit = async () => {
+        if (!pendingTicketSubmission) return;
+        const ticketData = pendingTicketSubmission;
+        setPendingTicketSubmission(null);
+        setTicketNotice(null);
+        await submitTicket(ticketData, true, Boolean(ticketData.useNewMachine));
     };
 
     const handleSubmitRating = async () => {
@@ -1066,7 +1166,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
                                 {hasInsufficientFundsForPriority(newTicket.priority) && (
                                     <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-sm text-amber-700 dark:text-amber-300">
-                                        Insufficient funds for this priority ({getSelectedPriorityCost(newTicket.priority)} DT). You can continue now and pay later after admin review.
+                                        Insufficient funds for this priority ({getSelectedPriorityCost(newTicket.priority)} DT). The ticket will still be submitted and the admin will be notified automatically.
                                     </div>
                                 )}
 
@@ -1105,7 +1205,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     )}
 
                     {/* Recent Tickets Table */}
-                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+                    <div ref={ticketsSectionRef} className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
                         <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                             <div>
                                 <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">My Support Tickets</h3>
@@ -1245,6 +1345,50 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     </div>
                 </div>
             </main>
+
+            {ticketNotice && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={closeTicketNotice}>
+                    <div className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl max-w-lg w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                        <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="h-10 w-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
+                                    <span className="material-symbols-outlined text-amber-600 dark:text-amber-300">warning</span>
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">{ticketNotice.title}</h3>
+                                    <p className="text-xs text-slate-500">Support ticket alert</p>
+                                </div>
+                            </div>
+                            <button onClick={closeTicketNotice} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors">
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+                        <div className="p-6 space-y-4">
+                            <p className="text-sm text-slate-700 dark:text-slate-300">{ticketNotice.message}</p>
+                            <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200">
+                                <p className="font-semibold">Payment deadline</p>
+                                <p>You need to settle this within {ticketNotice.deadline}.</p>
+                            </div>
+                            <div className="flex justify-end">
+                                {pendingTicketSubmission && (
+                                    <button
+                                        onClick={handleConfirmLowBalanceSubmit}
+                                        className="px-5 py-2.5 bg-amber-600 text-white rounded-lg font-semibold hover:bg-amber-700 transition-colors mr-3"
+                                    >
+                                        {ticketNotice.confirmLabel || 'Submit anyway'}
+                                    </button>
+                                )}
+                                <button
+                                    onClick={closeTicketNotice}
+                                    className="px-5 py-2.5 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 transition-colors"
+                                >
+                                    Okay
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Rating Modal */}
             {ratingTicket && (

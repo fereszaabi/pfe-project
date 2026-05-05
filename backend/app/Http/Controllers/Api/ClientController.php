@@ -16,13 +16,36 @@ use Laravel\Sanctum\PersonalAccessToken;
 
 class ClientController extends Controller
 {
+    private function resolveClient($user)
+    {
+        if (!$user) {
+            return null;
+        }
+
+        $client = null;
+
+        if (!empty($user->cin)) {
+            $client = Client::where('cin', $user->cin)->first();
+        }
+
+        if (!$client && !empty($user->code_fiscal)) {
+            $client = Client::where('code_fiscal', $user->code_fiscal)->first();
+        }
+
+        $email = $user->mail ?? $user->email ?? null;
+        if (!$client && !empty($email)) {
+            $client = Client::where('mail', $email)->first();
+        }
+
+        return $client;
+    }
     /**
      * Display a listing of the resource.
      */
     public function index(Request $request)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = $this->resolveClient($user);
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -92,7 +115,7 @@ class ClientController extends Controller
     public function getMachines(Request $request)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = $this->resolveClient($user);
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -126,7 +149,7 @@ class ClientController extends Controller
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
-        $client = Client::where('cin', $user->cin)->first();
+        $client = $this->resolveClient($user);
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
         }
@@ -157,7 +180,7 @@ class ClientController extends Controller
                 if ($logs->isNotEmpty()) {
                     $lastSentId = $logs->last()->id;
                     echo "event: logs\n";
-                    echo 'data: ' . json_encode(['logs' => $logs]) . "\n\n";
+                        $client = $this->resolveClient($user);
                 } else {
                     echo "event: ping\n";
                     echo 'data: ' . json_encode(['type' => 'ping', 'time' => now()->toISOString()]) . "\n\n";
@@ -224,50 +247,68 @@ class ClientController extends Controller
             'urgent' => 30,
         ];
         $priorityKey = strtolower((string) $request->priority);
-        $requiredFee = $priorityFees[$priorityKey] ?? 0;
+            $client = $this->resolveClient($user);
         $hasInsufficientFunds = $client->money < $requiredFee;
+        $paymentDeadline = now()->addWeek();
+        $originalBalance = $client->money;
 
-        $demande = Demande::create([
-            'id_client'             => $clientId,
-            'titre'                 => $request->titre,
-            'id_employee'           => null,
-            'priority'              => $request->priority,
-            'id_machine'            => $machineId,
-            'description'           => $request->description,
-            'image'                 => $imagePath,
-            'status'                => 'submitted',
-            'ticket_cost'           => 0,
-            'total_cost'            => 0,
-            'payment_status'        => 'pending',
-            'end_at'                => null,
-            'employee_note'         => null,
-            'insufficient_funds'    => $hasInsufficientFunds,
-            'created_at'            => now(),
-        ]);
+        try {
+            $result = \DB::transaction(function () use ($client, $clientId, $request, $machineId, $imagePath, $requiredFee, $hasInsufficientFunds, $paymentDeadline, $originalBalance) {
+                $newBalance = $client->money - $requiredFee;
+                $client->update(['money' => $newBalance]);
 
-        // If the client is in debt, create a simple Log entry for admins
-        if ($hasInsufficientFunds) {
-            try {
-                \App\Models\Log::create([
-                    'demande_id' => $demande->id,
-                    'client_id' => $clientId,
-                    'description' => 'Client created a ticket with insufficient funds: balance ' . $client->money . ', required ' . $requiredFee,
-                    'status' => 'insufficient_funds',
-                    'created_at_demande' => now(),
+                $demande = Demande::create([
+                    'id_client'             => $clientId,
+                    'titre'                 => $request->titre,
+                    'id_employee'           => null,
+                    'priority'              => $request->priority,
+                    'id_machine'            => $machineId,
+                    'description'           => $request->description,
+                    'image'                 => $imagePath,
+                    'status'                => 'submitted',
+                    'ticket_cost'           => $requiredFee,
+                    'total_cost'            => $requiredFee,
+                    'payment_status'        => $hasInsufficientFunds ? 'pending' : 'paid',
+                    'paid_at'               => $hasInsufficientFunds ? null : now(),
+                    'payment_notes'         => $hasInsufficientFunds
+                        ? 'Payment due within 7 days. Admin notified.'
+                        : 'Ticket fee charged on submission.',
+                    'end_at'                => null,
+                    'employee_note'         => null,
+                    'insufficient_funds'    => $hasInsufficientFunds,
+                    'admin_approved_override' => false,
+                    'created_at'            => now(),
                 ]);
-            } catch (\Throwable $e) {
-                // swallow: logging failure should not affect client flow
-            }
-        }
 
-        return response()->json([
-            'demande' => $demande,
-            'client_balance' => $client->money,
-            'insufficient_funds' => $hasInsufficientFunds,
-            'warning' => $hasInsufficientFunds
-                ? 'Warning: Client has insufficient funds. Admin approval required to proceed.'
-                : null,
-        ], 201);
+                try {
+                    \App\Models\Log::create([
+                        'demande_id' => $demande->id,
+                        'client_id' => $clientId,
+                        'description' => $hasInsufficientFunds
+                            ? 'Client submitted a ticket with insufficient funds. Required ' . $requiredFee . ' TND, balance changed from ' . $originalBalance . ' to ' . $newBalance . '. Payment due within 7 days. Admin notified.'
+                            : 'Client submitted a ticket and was charged ' . $requiredFee . ' TND. New balance: ' . $newBalance,
+                        'status' => $hasInsufficientFunds ? 'insufficient_funds' : 'balance_change',
+                        'created_at_demande' => now(),
+                    ]);
+                } catch (\Throwable $e) {
+                    // swallow: logging failure should not affect client flow
+                }
+
+                return [
+                    'demande' => $demande,
+                    'client_balance' => $newBalance,
+                    'insufficient_funds' => $hasInsufficientFunds,
+                    'warning' => $hasInsufficientFunds
+                        ? 'Insufficient funds. Your ticket was submitted. Please pay within 7 days. An admin has been notified.'
+                        : null,
+                    'payment_deadline' => $hasInsufficientFunds ? $paymentDeadline->toDateString() : null,
+                ];
+            });
+
+            return response()->json($result, 201);
+        } catch (\Throwable $e) {
+            return response()->json(['error' => 'Failed to submit ticket: ' . $e->getMessage()], 500);
+        }
     }
 
     /**
@@ -276,7 +317,7 @@ class ClientController extends Controller
     public function show(Request $request, Demande $ticket)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = $this->resolveClient($user);
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -307,7 +348,7 @@ class ClientController extends Controller
     public function rate(Request $request, Demande $ticket)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = $this->resolveClient($user);
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -367,10 +408,15 @@ class ClientController extends Controller
      */
     public function destroy(Request $request, Demande $ticket)
     {
-        $clientId = $request->user()->id;
+        $user = $request->user();
+        $client = $this->resolveClient($user);
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
 
         // Ensure the ticket belongs to the authenticated client
-        if ($ticket->id_client !== $clientId) {
+        if ($ticket->id_client !== $client->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
         }
 
@@ -384,7 +430,7 @@ class ClientController extends Controller
     public function getLogs(Request $request)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = $this->resolveClient($user);
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -426,7 +472,7 @@ class ClientController extends Controller
                 'total_logs' => $logs->total(),
             ],
         ]);
-    }
+                $client = $this->resolveClient($user);
 
     /**
      * Mark a client log as read (notification consumed)
@@ -434,7 +480,7 @@ class ClientController extends Controller
     public function markLogRead(Request $request, $logId)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = $this->resolveClient($user);
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -457,7 +503,7 @@ class ClientController extends Controller
      * Delete the image attached to a ticket. Clients can delete their own attachments; employees can delete attachments on tickets they handle.
      */
     public function deleteTicketImage(Request $request, Demande $ticket)
-    {
+        $client = $this->resolveClient($user);
         $user = $request->user();
 
         // Authorization: clients must own the ticket; employees must be assigned or have employee role
@@ -482,7 +528,7 @@ class ClientController extends Controller
             if (\Illuminate\Support\Facades\Storage::disk('public')->exists($original)) {
                 \Illuminate\Support\Facades\Storage::disk('public')->delete($original);
             }
-
+                $client = $this->resolveClient($user);
             $ticket->update(['image' => null]);
             return response()->json(['message' => 'Image deleted', 'ticket' => $ticket->fresh()]);
         } catch (\Throwable $e) {
