@@ -26,18 +26,35 @@ class ClientController extends Controller
 
         if (!empty($user->cin)) {
             $client = Client::where('cin', $user->cin)->first();
+            if ($client) {
+                return $client;
+            }
         }
 
-        if (!$client && !empty($user->code_fiscal)) {
+        if (!empty($user->code_fiscal)) {
             $client = Client::where('code_fiscal', $user->code_fiscal)->first();
+            if ($client) {
+                return $client;
+            }
         }
 
-        $email = $user->mail ?? $user->email ?? null;
-        if (!$client && !empty($email)) {
+        $email = $user->email ?? null;
+        if (!empty($email)) {
             $client = Client::where('mail', $email)->first();
+            if ($client) {
+                return $client;
+            }
         }
 
-        return $client;
+        // Debug: Log what we're looking for
+        \Log::debug('Client not resolved', [
+            'user_id' => $user->id,
+            'user_cin' => $user->cin ?? 'null',
+            'user_code_fiscal' => $user->code_fiscal ?? 'null',
+            'user_email' => $user->email ?? 'null',
+        ]);
+
+        return null;
     }
     /**
      * Display a listing of the resource.
@@ -45,11 +62,26 @@ class ClientController extends Controller
     public function index(Request $request)
     {
         $user = $request->user();
+        \Log::debug('index: User from token', [
+            'user_id' => $user?->id,
+            'user_role' => $user?->role,
+            'user_cin' => $user?->cin,
+            'user_code_fiscal' => $user?->code_fiscal,
+            'user_email' => $user?->email,
+        ]);
+
         $client = $this->resolveClient($user);
 
         if (!$client) {
+            \Log::debug('index: Client not found after resolution');
             return response()->json(['error' => 'Client not found'], 404);
         }
+
+        \Log::debug('index: Client resolved', [
+            'client_id' => $client->id,
+            'client_cin' => $client->cin,
+            'client_mail' => $client->mail,
+        ]);
 
         $clientId = $client->id;
 
@@ -92,6 +124,12 @@ class ClientController extends Controller
         $demandes = $demandesQuery
             ->latest('created_at')
             ->paginate($perPage);
+
+        \Log::debug('index: Demandes fetched', [
+            'count' => count($demandes->items()),
+            'total' => $demandes->total(),
+            'per_page' => $perPage,
+        ]);
 
         $counts = [
             'total'       => Demande::where('id_client', $clientId)->count(),
@@ -204,11 +242,26 @@ class ClientController extends Controller
     public function store(Request $request)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        \Log::debug('store: User from token', [
+            'user_id' => $user?->id,
+            'user_role' => $user?->role,
+            'user_cin' => $user?->cin,
+            'user_code_fiscal' => $user?->code_fiscal,
+            'user_email' => $user?->email,
+        ]);
+
+        $client = $this->resolveClient($user);
 
         if (!$client) {
+            \Log::debug('store: Client not found after resolution');
             return response()->json(['error' => 'Client not found'], 404);
         }
+
+        \Log::debug('store: Client resolved', [
+            'client_id' => $client->id,
+            'client_cin' => $client->cin,
+            'client_mail' => $client->mail,
+        ]);
 
         $clientId = $client->id;
 
