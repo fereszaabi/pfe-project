@@ -22,6 +22,7 @@ export function TicketTracking({ ticketId, onBack }) {
     const [showChat, setShowChat] = useState(false);
     const messagesEndRef = useRef(null);
     const lastSeenMessageIdRef = useRef(null);
+    const ticketDetailCacheRef = useRef(new Map());
 
     const ticketTimeline = ticket ? [
         {
@@ -238,6 +239,104 @@ export function TicketTracking({ ticketId, onBack }) {
         }
     };
 
+    const cacheTicketDetails = (ticketData) => {
+        if (!ticketId || !ticketData) return;
+        ticketDetailCacheRef.current.set(ticketId, {
+            ticket: ticketData,
+            timestamp: Date.now(),
+        });
+    };
+
+    const isTicketCacheFresh = (cachedEntry) => {
+        return cachedEntry && (Date.now() - cachedEntry.timestamp) < 1000 * 60 * 5;
+    };
+
+    const loadTicketData = async ({ refresh = false, silentMessages = false } = {}) => {
+        try {
+            if (!silentMessages) {
+                setLoadingMessages(true);
+            }
+
+            const ticketPromise = refresh || !ticket
+                ? getClientTicket(ticketId)
+                : Promise.resolve({ ticket });
+            const messagesPromise = getTicketMessages(ticketId);
+
+            const [ticketResult, messagesResult] = await Promise.allSettled([ticketPromise, messagesPromise]);
+
+            if (ticketResult.status === 'fulfilled') {
+                const ticketData = ticketResult.value?.ticket ?? ticketResult.value;
+                if (ticketData) {
+                    setTicket(ticketData);
+                    cacheTicketDetails(ticketData);
+                    if (ticketData?.status && !previousStatus) {
+                        setPreviousStatus(ticketData.status);
+                    }
+                }
+            } else {
+                console.error('Error loading ticket details:', ticketResult.reason);
+            }
+
+            if (messagesResult.status === 'fulfilled') {
+                const msgs = Array.isArray(messagesResult.value?.messages) ? messagesResult.value.messages : [];
+                setConversationMessages(msgs);
+
+                const latestMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+                if (latestMsg?.id) {
+                    if (lastSeenMessageIdRef.current === null) {
+                        lastSeenMessageIdRef.current = latestMsg.id;
+                    } else if (latestMsg.id !== lastSeenMessageIdRef.current && isMessageFromTechnician(latestMsg)) {
+                        const newNotification = {
+                            id: Date.now(),
+                            type: 'message',
+                            title: 'New Message',
+                            message: `New message from technician: ${latestMsg.message?.slice(0, 60) || ''}`,
+                            timestamp: new Date(),
+                            read: false,
+                        };
+                        setNotifications(prev => [newNotification, ...prev]);
+                        setUnreadCount(prev => prev + 1);
+                        setNotificationToast(newNotification);
+                        setTimeout(() => setNotificationToast(null), 5000);
+                        lastSeenMessageIdRef.current = latestMsg.id;
+                    } else {
+                        lastSeenMessageIdRef.current = latestMsg.id;
+                    }
+                }
+            } else {
+                console.error('Error loading ticket messages:', messagesResult.reason);
+            }
+        } catch (err) {
+            console.error('Error loading ticket content:', err);
+        } finally {
+            if (!silentMessages) {
+                setLoadingMessages(false);
+            }
+        }
+    };
+
+    const loadTicket = async () => {
+        setError(null);
+        const cachedEntry = ticketDetailCacheRef.current.get(ticketId);
+
+        if (cachedEntry && isTicketCacheFresh(cachedEntry)) {
+            setTicket(cachedEntry.ticket);
+            setLoading(false);
+            loadTicketData({ refresh: true, silentMessages: true });
+            return;
+        }
+
+        setLoading(true);
+        try {
+            await loadTicketData();
+        } catch (err) {
+            console.error('Error loading ticket:', err);
+            setError('Failed to load ticket details');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     const handleSendMessage = async () => {
         if (!messageText.trim()) {
             console.warn('Message text is empty');
@@ -312,27 +411,6 @@ export function TicketTracking({ ticketId, onBack }) {
         }
     };
 
-    const loadTicket = async () => {
-        try {
-            setLoading(true);
-            setError(null);
-            const data = await getClientTicket(ticketId);
-            const ticketData = data?.ticket ?? data;
-            setTicket(ticketData);
-            if (ticketData?.status && !previousStatus) {
-                setPreviousStatus(ticketData.status);
-            }
-            // Load messages for this ticket
-            await fetchConversationMessages();
-        } catch (err) {
-            console.error('Error loading ticket:', err);
-            setError('Failed to load ticket details');
-        } finally {
-            setLoading(false);
-        }
-    };
-
-
     const markAsRead = (notifId) => {
         setNotifications(prev => prev.map(n => n.id === notifId ? { ...n, read: true } : n));
         setUnreadCount(prev => Math.max(0, prev - 1));
@@ -355,12 +433,13 @@ export function TicketTracking({ ticketId, onBack }) {
 
     if (loading) {
         return (
-            <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex items-center justify-center">
-                <div className="text-center">
-                    <div className="animate-spin mb-4">
-                        <span className="material-symbols-outlined text-4xl text-primary">refresh</span>
+            <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex items-center justify-center px-4">
+                <div className="max-w-sm w-full rounded-3xl bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 shadow-xl p-8 text-center">
+                    <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 text-primary mb-4 animate-pulse">
+                        <span className="material-symbols-outlined text-3xl">support_agent</span>
                     </div>
-                    <p className="text-slate-500">Loading ticket details...</p>
+                    <p className="text-lg font-semibold text-slate-900 dark:text-white mb-2">Opening ticket details…</p>
+                    <p className="text-sm text-slate-500 dark:text-slate-400">Fetching your ticket and conversation faster.</p>
                 </div>
             </div>
         );

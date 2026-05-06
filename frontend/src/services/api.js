@@ -13,17 +13,31 @@ function authHeaders() {
     };
 }
 
-async function apiRequest(method, path, body = null) {
-    const opts = { method, headers: authHeaders() };
+async function apiRequest(method, path, body = null, timeout = 30000) {
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const opts = { method, headers: authHeaders(), signal };
     if (body) opts.body = JSON.stringify(body);
-    const res = await fetch(BASE + path, opts);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw data;
-    return data;
+
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    try {
+        const res = await fetch(BASE + path, opts);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw data;
+        return data;
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw { error: 'Request timed out. Please try again.' };
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeoutId);
+    }
 }
 
-async function apiUpload(method, path, formData) {
+async function apiUpload(method, path, formData, timeout = 10000) {
     const token = getToken();
+    const controller = new AbortController();
     const opts = {
         method,
         headers: {
@@ -31,11 +45,23 @@ async function apiUpload(method, path, formData) {
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: formData,
+        signal: controller.signal,
     };
-    const res = await fetch(BASE + path, opts);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw data;
-    return data;
+
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    try {
+        const res = await fetch(BASE + path, opts);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw data;
+        return data;
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw { error: 'Request timed out. Please try again.' };
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeoutId);
+    }
 }
 
 function buildQuery(params = {}) {

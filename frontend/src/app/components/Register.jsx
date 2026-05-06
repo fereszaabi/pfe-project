@@ -7,6 +7,7 @@ export function Register({ onRegister, onSwitchToLogin }) {
         email: '',
         cin: '',
         code_fiscal: '',
+        code_anydesk: '',
         numero: '',
         password: '',
         password_confirmation: ''
@@ -175,6 +176,23 @@ export function Register({ onRegister, onSwitchToLogin }) {
                                     onChange={handleChange}
                                     className="w-full rounded-lg border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:border-primary focus:ring-primary h-12 px-4 placeholder:text-slate-400 transition-colors"
                                     placeholder="e.g. ID-9988-X"
+                                />
+                            </div>
+
+                            {/* Initial AnyDesk Code */}
+                            <div className="flex flex-col gap-2 md:col-span-2">
+                                <label className="text-slate-700 dark:text-slate-200 text-sm font-semibold flex items-center gap-2">
+                                    <span className="material-symbols-outlined text-lg opacity-60">desktop_windows</span>
+                                    Initial AnyDesk Code
+                                </label>
+                                <input
+                                    name="code_anydesk"
+                                    type="text"
+                                    required
+                                    value={formData.code_anydesk}
+                                    onChange={handleChange}
+                                    className="w-full rounded-lg border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:border-primary focus:ring-primary h-12 px-4 placeholder:text-slate-400 transition-colors font-mono"
+                                    placeholder="e.g. 123 456 789"
                                 />
                             </div>
 

@@ -34,6 +34,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [tickets, setTickets] = useState([]);
     const [loadingTickets, setLoadingTickets] = useState(true);
     const [ticketSearch, setTicketSearch] = useState('');
+    const [debouncedTicketSearch, setDebouncedTicketSearch] = useState('');
     const [ticketPage, setTicketPage] = useState(1);
     const [ticketTotalPages, setTicketTotalPages] = useState(1);
     const [machines, setMachines] = useState([]);
@@ -80,64 +81,64 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     };
 
     const normalizeTicketsResponse = (data) => {
+        console.log('Raw ticket data:', data);
         const demandesPayload = data?.demandes?.data ?? data?.demandes ?? data?.data ?? [];
+        console.log('Normalized tickets:', demandesPayload);
         const totalPages = data?.demandes?.last_page ?? data?.pagination?.total_pages ?? data?.last_page ?? 1;
+        
         return {
             tickets: Array.isArray(demandesPayload) ? demandesPayload : [],
             totalPages,
         };
     };
 
-    const fetchTicketsList = async (options = {}) => {
-        const params = {
-            per_page: 10,
-            page: ticketPage,
-            search: ticketSearch.trim(),
-            ...options,
-        };
-        const data = await getClientTickets(params);
-        const { tickets: nextTickets, totalPages } = normalizeTicketsResponse(data);
-        setTickets(nextTickets);
-        setTicketTotalPages(totalPages);
-        return { tickets: nextTickets, totalPages };
+    const loadTickets = async (page = ticketPage, search = debouncedTicketSearch) => {
+        if (isFetchingTicketsRef.current) return;
+        isFetchingTicketsRef.current = true;
+        setLoadingTickets(true);
+
+        try {
+            const params = { all: 1 };
+            if (search.trim()) {
+                params.search = search.trim();
+            }
+            const ticketData = await getClientTickets(params).catch(() => null);
+
+            const { tickets: nextTickets, totalPages } = normalizeTicketsResponse(ticketData);
+            console.log('Loaded tickets:', nextTickets);
+            setTickets(nextTickets);
+            setTicketTotalPages(totalPages);
+        } finally {
+            isFetchingTicketsRef.current = false;
+            setLoadingTickets(false);
+        }
+    };
+
+    const loadDashboardData = async () => {
+        try {
+            const [machineData, profileData] = await Promise.all([
+                getMachines().catch(() => null),
+                getClientProfile().catch(() => null),
+            ]);
+
+            if (Array.isArray(machineData?.machines)) {
+                setMachines(machineData.machines);
+            }
+
+            const profileBalance = Number(profileData?.profile?.money ?? profileData?.money ?? NaN);
+            if (!Number.isNaN(profileBalance)) {
+                setClientBalance(profileBalance);
+            }
+        } catch (error) {
+            // Handle errors if needed
+        }
     };
 
     useEffect(() => {
-        let isMounted = true;
         let channel = null;
 
-        const fetchTickets = async (showLoader = false) => {
-            if (isFetchingTicketsRef.current) return;
-            isFetchingTicketsRef.current = true;
-
-            if (showLoader) {
-                setLoadingTickets(true);
-            }
-            try {
-                const data = await getClientTickets({
-                    per_page: 10,
-                    page: ticketPage,
-                    search: ticketSearch.trim(),
-                });
-                if (isMounted) {
-                    const { tickets: nextTickets, totalPages } = normalizeTicketsResponse(data);
-                    setTickets(nextTickets);
-                    setTicketTotalPages(totalPages);
-                }
-            } catch (_) {
-                if (isMounted) {
-                    setTickets([]);
-                    setTicketTotalPages(1);
-                }
-            } finally {
-                isFetchingTicketsRef.current = false;
-                if (showLoader) {
-                    setLoadingTickets(false);
-                }
-            }
-        };
-
-        fetchTickets(true);
+        loadDashboardData();
+        loadTickets();
 
         try {
             if (user?.id) {
@@ -146,6 +147,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
                 channel.listen('.ticket.updated', (event) => {
                     const updatedTicket = event?.ticket;
+                    console.log('Realtime ticket update:', updatedTicket);
                     if (!updatedTicket?.id) return;
 
                     setTickets((prev) => {
@@ -156,7 +158,8 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                             );
                         }
 
-                        return [updatedTicket, ...prev];
+                        // Don't add new tickets from realtime, only update existing
+                        return prev;
                     });
                 });
             }
@@ -166,7 +169,6 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         }
 
         return () => {
-            isMounted = false;
             if (channel) {
                 try {
                     channel.unsubscribe();
@@ -175,7 +177,20 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 }
             }
         };
-    }, [user?.id, ticketPage, ticketSearch]);
+    }, [user?.id]);
+
+    // Debounce search
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setDebouncedTicketSearch(ticketSearch);
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [ticketSearch]);
+
+    // Load tickets when page or debounced search changes
+    useEffect(() => {
+        loadTickets(ticketPage, debouncedTicketSearch);
+    }, [ticketPage, debouncedTicketSearch]);
 
     // Real-time client logs (SSE) with polling fallback for notifications
     useEffect(() => {
@@ -526,7 +541,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         return fd;
     };
 
-    const submitTicket = async (ticketData, allowLowBalance = false, useNewMachine = createNewMachine) => {
+    const submitTicket = async (ticketData, useNewMachine = createNewMachine) => {
         setSubmitError('');
 
         // Validate machine selection
@@ -542,15 +557,12 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         const fee = getSelectedPriorityCost(ticketData.priority);
         const lowBalance = Number(clientBalance) < fee;
 
-        if (lowBalance && !allowLowBalance) {
-            setPendingTicketSubmission({ ...ticketData, useNewMachine });
+        if (lowBalance) {
             setTicketNotice({
                 title: 'Insufficient funds',
                 message: 'Your ticket can still be submitted. Please pay within 7 days and an admin will be notified.',
                 deadline: '7 days',
-                confirmLabel: 'Submit anyway',
             });
-            return;
         }
 
         setIsSubmittingTicket(true);
@@ -589,18 +601,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 setClientBalance(profileBalance);
             }
 
-            const { tickets: fetchedTickets } = await fetchTicketsList({ page: 1, search: '' });
-            const createdTicket = response?.demande;
-            if (createdTicket?.id) {
-                setTickets((prev) => {
-                    const withoutDuplicate = prev.filter((ticket) => ticket.id !== createdTicket.id);
-                    return [createdTicket, ...withoutDuplicate];
-                });
-            } else {
-                setTickets(fetchedTickets);
-            }
-            setTicketPage(1);
-            setTicketSearch('');
+            await loadTickets();
             setNewTicket({ titre: '', description: '', machine_id: '', code_anydesk: '', priority: 'low', image: null });
             setCreateNewMachine(false);
             setShowCreateTicket(false);
@@ -637,15 +638,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        await submitTicket(newTicket, false, createNewMachine);
-    };
-
-    const handleConfirmLowBalanceSubmit = async () => {
-        if (!pendingTicketSubmission) return;
-        const ticketData = pendingTicketSubmission;
-        setPendingTicketSubmission(null);
-        setTicketNotice(null);
-        await submitTicket(ticketData, true, Boolean(ticketData.useNewMachine));
+        await submitTicket(newTicket, createNewMachine);
     };
 
     const handleSubmitRating = async () => {
@@ -668,8 +661,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     )
                 );
             } else {
-                const data = await getClientTickets({ per_page: 10 });
-                setTickets(data.demandes?.data ?? data.demandes ?? []);
+                await loadTickets();
             }
 
             setRatingTicket(null);
@@ -1370,14 +1362,6 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                 <p>You need to settle this within {ticketNotice.deadline}.</p>
                             </div>
                             <div className="flex justify-end">
-                                {pendingTicketSubmission && (
-                                    <button
-                                        onClick={handleConfirmLowBalanceSubmit}
-                                        className="px-5 py-2.5 bg-amber-600 text-white rounded-lg font-semibold hover:bg-amber-700 transition-colors mr-3"
-                                    >
-                                        {ticketNotice.confirmLabel || 'Submit anyway'}
-                                    </button>
-                                )}
                                 <button
                                     onClick={closeTicketNotice}
                                     className="px-5 py-2.5 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 transition-colors"

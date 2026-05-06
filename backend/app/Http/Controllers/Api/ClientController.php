@@ -24,6 +24,14 @@ class ClientController extends Controller
 
         $client = null;
 
+        $email = $user->email ?? null;
+        if (!empty($email)) {
+            $client = Client::where('mail', $email)->first();
+            if ($client) {
+                return $client;
+            }
+        }
+
         if (!empty($user->cin)) {
             $client = Client::where('cin', $user->cin)->first();
             if ($client) {
@@ -33,14 +41,6 @@ class ClientController extends Controller
 
         if (!empty($user->code_fiscal)) {
             $client = Client::where('code_fiscal', $user->code_fiscal)->first();
-            if ($client) {
-                return $client;
-            }
-        }
-
-        $email = $user->email ?? null;
-        if (!empty($email)) {
-            $client = Client::where('mail', $email)->first();
             if ($client) {
                 return $client;
             }
@@ -89,11 +89,13 @@ class ClientController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
             'search' => 'nullable|string|max:120',
             'status' => 'nullable|string|max:50',
+            'all' => 'nullable|boolean',
         ]);
 
         $perPage = (int) ($validated['per_page'] ?? 10);
         $search = trim((string) ($validated['search'] ?? ''));
         $status = $validated['status'] ?? null;
+        $fetchAll = $request->boolean('all');
 
         $demandesQuery = Demande::where('id_client', $clientId)
             ->select([
@@ -121,8 +123,29 @@ class ClientController extends Controller
             });
         }
 
+        $demandesQuery->latest('created_at');
+
+        if ($fetchAll) {
+            $demandes = $demandesQuery->get();
+            \Log::debug('index: Demandes fetched (all)', [
+                'count' => $demandes->count(),
+            ]);
+
+            return response()->json([
+                'ok' => true,
+                'demandes' => $demandes,
+                'counts' => [
+                    'total' => $demandes->count(),
+                    'open' => $demandes->where('status', 'submitted')->count(),
+                    'closed' => $demandes->where('status', 'resolved')->count(),
+                    'in_progress' => $demandes->where('status', 'in progress')->count(),
+                    'tech' => $demandes->where('status', 'tech')->count(),
+                    'money' => Client::where('id', $clientId)->value('money'),
+                ],
+            ]);
+        }
+
         $demandes = $demandesQuery
-            ->latest('created_at')
             ->paginate($perPage);
 
         \Log::debug('index: Demandes fetched', [
