@@ -143,16 +143,22 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
         }
 
         const echo = getEcho();
-        const channel = echo.private(`user.user.${user.id}`);
+        const channels = [`user.user.${user.id}`];
+        if (user.role === 'employee') {
+            channels.push(`user.employee.${user.id}`);
+        }
 
-        channel.listen('.ticket.message.created', (event) => {
-            if (!event?.message) return;
-            setUnreadMessagesCount((prev) => prev + 1);
+        channels.forEach((channelName) => {
+            const channel = echo.private(channelName);
+            channel.listen('.ticket.message.created', (event) => {
+                if (!event?.message) return;
+                setUnreadMessagesCount((prev) => prev + 1);
+            });
         });
 
         return () => {
             isMounted = false;
-            echo.leave(`user.user.${user.id}`);
+            channels.forEach((channelName) => echo.leave(channelName));
         };
     }, [user?.id]);
 

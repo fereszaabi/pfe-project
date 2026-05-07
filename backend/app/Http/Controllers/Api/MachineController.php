@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Machine;
 use App\Models\Client;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 
 class MachineController extends Controller
@@ -15,7 +16,9 @@ class MachineController extends Controller
     public function index(Request $request)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -35,11 +38,13 @@ class MachineController extends Controller
     {
         $validated = $request->validate([
             'nom_poste' => 'required|string|max:255',
-            'code_anydesk' => 'nullable|string|max:255',
+            'code_anydesk' => 'required|string|max:255',
         ]);
 
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -60,7 +65,9 @@ class MachineController extends Controller
     public function update(Request $request, Machine $machine)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -73,7 +80,7 @@ class MachineController extends Controller
 
         $validated = $request->validate([
             'nom_poste' => 'sometimes|string|max:255',
-            'code_anydesk' => 'nullable|string|max:255',
+            'code_anydesk' => 'sometimes|required|string|max:255',
         ]);
 
         $machine->update($validated);
@@ -87,7 +94,9 @@ class MachineController extends Controller
     public function destroy(Request $request, Machine $machine)
     {
         $user = $request->user();
-        $client = Client::where('cin', $user->cin)->first();
+        $client = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if (!$client) {
             return response()->json(['error' => 'Client not found'], 404);
@@ -96,6 +105,13 @@ class MachineController extends Controller
         // Ensure the machine belongs to the authenticated client
         if ($machine->id_client !== $client->id) {
             return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        $machineCount = Machine::where('id_client', $client->id)->count();
+        if ($machineCount <= 1) {
+            return response()->json([
+                'error' => 'Each client must keep at least one AnyDesk machine code',
+            ], 422);
         }
 
         $machine->delete();

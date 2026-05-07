@@ -102,7 +102,10 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             if (search.trim()) {
                 params.search = search.trim();
             }
-            const ticketData = await getClientTickets(params).catch(() => null);
+            const ticketData = await getClientTickets(params).catch((err) => {
+                console.error('Error loading tickets:', err);
+                return null;
+            });
 
             const { tickets: nextTickets, totalPages } = normalizeTicketsResponse(ticketData);
             console.log('Loaded tickets:', nextTickets);
@@ -389,6 +392,8 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
     // small in-app toast for important notifications (balance changes)
     const [notificationToast, setNotificationToast] = useState(null);
+    const [activeNotificationId, setActiveNotificationId] = useState(null);
+
     useEffect(() => {
         if (!notifications || notifications.length === 0) return;
         const latest = notifications.find(n => n.type === 'balance_change' || n.type === 'log');
@@ -401,17 +406,40 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         }
     }, [notifications]);
 
-    const openNotification = async (notif) => {
+    useEffect(() => {
+        if (!notifications || notifications.length === 0) {
+            setActiveNotificationId(null);
+            return;
+        }
+
+        if (!activeNotificationId || !notifications.some((notif) => notif.id === activeNotificationId)) {
+            setActiveNotificationId(notifications[0].id);
+        }
+    }, [notifications, activeNotificationId]);
+
+    const activeNotification = notifications.find((notif) => notif.id === activeNotificationId) || null;
+
+    const selectNotification = async (notif) => {
         try {
             await markClientLogRead(notif.id).catch(() => null);
-            setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, read: true } : n));
-            setUnreadCount(prev => Math.max(0, prev - 1));
-            setShowNotifications(false);
-            if (notif.ticketId) {
-                onViewTicket?.(notif.ticketId);
-            }
+            setNotifications((prev) => prev.map((n) => (n.id === notif.id ? { ...n, read: true } : n)));
+            setUnreadCount((prev) => Math.max(0, prev - 1));
+            setActiveNotificationId(notif.id);
+            setShowNotifications(true);
         } catch (e) {
             // ignore
+        }
+    };
+
+    const markAllNotificationsAsRead = () => {
+        setNotifications((prev) => prev.map((notif) => ({ ...notif, read: true })));
+        setUnreadCount(0);
+    };
+
+    const openNotification = (notif) => {
+        selectNotification(notif);
+        if (notif.ticketId) {
+            onViewTicket?.(notif.ticketId);
         }
     };
 
@@ -498,17 +526,23 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
         try {
             const echo = getEcho();
-            const channel = echo.private(`user.user.${user.id}`);
+            const channels = [`user.user.${user.id}`];
+            if (user.role === 'client') {
+                channels.push(`user.client.${user.id}`);
+            }
 
-            channel.listen('.ticket.message.created', (event) => {
-                if (!event?.message) return;
-                setUnreadMessagesCount((prev) => prev + 1);
+            channels.forEach((channelName) => {
+                const channel = echo.private(channelName);
+                channel.listen('.ticket.message.created', (event) => {
+                    if (!event?.message) return;
+                    setUnreadMessagesCount((prev) => prev + 1);
+                });
             });
 
             return () => {
                 isMounted = false;
                 try {
-                    echo.leave(`user.user.${user.id}`);
+                    channels.forEach((channelName) => echo.leave(channelName));
                 } catch (e) {
                     // ignore cleanup errors
                 }
@@ -870,49 +904,88 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                             </button>
 
                             {showNotifications && (
-                                <div className="absolute right-0 mt-2 w-80 bg-white dark:bg-surface-dark rounded-lg shadow-2xl border border-slate-200 dark:border-border-dark z-50 max-h-96 overflow-y-auto">
-                                    <div className="p-4 border-b border-slate-200 dark:border-border-dark sticky top-0 bg-white dark:bg-surface-dark">
-                                        <div className="flex items-center justify-between">
+                                <div className="absolute right-0 mt-2 w-[30rem] bg-white dark:bg-surface-dark rounded-lg shadow-2xl border border-slate-200 dark:border-border-dark z-50 max-h-[38rem] overflow-hidden">
+                                    <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-border-dark sticky top-0 bg-white dark:bg-surface-dark z-10">
+                                        <div>
                                             <h3 className="font-bold text-slate-900 dark:text-white">Notifications</h3>
                                             {unreadCount > 0 && (
-                                                <span className="bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-xs font-bold px-2 py-1 rounded">
+                                                <span className="bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-xs font-bold px-2 py-1 rounded mt-1 inline-block">
                                                     {unreadCount} new
                                                 </span>
                                             )}
                                         </div>
+                                        <button onClick={markAllNotificationsAsRead} className="text-xs font-semibold text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white transition-colors">
+                                            Mark all read
+                                        </button>
                                     </div>
-                                    <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                                        {notifications.length > 0 ? (
-                                            notifications.map(notif => (
-                                                <div key={notif.id} onClick={() => openNotification(notif)} className={`p-4 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-750 transition-colors ${!notif.read ? 'bg-blue-50 dark:bg-blue-900/10' : ''}`}>
+
+                                    <div className="grid grid-cols-[1.2fr_1.8fr] gap-4 p-4 h-[34rem]">
+                                        <div className="overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
+                                            {notifications.length > 0 ? (
+                                                notifications.map((notif) => (
+                                                    <button
+                                                        key={notif.id}
+                                                        type="button"
+                                                        onClick={() => selectNotification(notif)}
+                                                        className={`w-full text-left p-4 border-b border-slate-200 dark:border-slate-800 transition-colors ${activeNotificationId === notif.id ? 'bg-white dark:bg-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-900/80'} ${!notif.read ? 'bg-blue-50 dark:bg-blue-900/10' : ''}`}
+                                                    >
+                                                        <div className="flex items-center justify-between gap-3">
+                                                            <div>
+                                                                <p className="font-semibold text-sm text-slate-900 dark:text-white">{notif.title}</p>
+                                                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">{notif.message}</p>
+                                                            </div>
+                                                            {!notif.read && (
+                                                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold">New</span>
+                                                            )}
+                                                        </div>
+                                                        <p className="mt-3 text-[11px] text-slate-400 dark:text-slate-500">{notif.timestamp.toLocaleString()}</p>
+                                                    </button>
+                                                ))
+                                            ) : (
+                                                <div className="p-8 text-center">
+                                                    <span className="material-symbols-outlined text-slate-300 dark:text-slate-600 text-3xl block mb-2">notifications_none</span>
+                                                    <p className="text-sm text-slate-500 dark:text-slate-400">No notifications yet</p>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4">
+                                            {activeNotification ? (
+                                                <>
                                                     <div className="flex items-start gap-3">
                                                         <div className="flex-shrink-0 mt-1">
-                                                            {notif.type === 'balance_change' && (
-                                                                <span className="material-symbols-outlined text-amber-500 text-xl">payments</span>
-                                                            )}
-                                                            {notif.type === 'log' && (
-                                                                <span className="material-symbols-outlined text-blue-500 text-xl">info</span>
+                                                            {activeNotification.type === 'balance_change' ? (
+                                                                <span className="material-symbols-outlined text-amber-500 text-3xl">payments</span>
+                                                            ) : (
+                                                                <span className="material-symbols-outlined text-blue-500 text-3xl">info</span>
                                                             )}
                                                         </div>
-                                                        <div className="flex-1 min-w-0">
-                                                            <div className="flex items-center justify-between">
-                                                                <p className="font-bold text-slate-900 dark:text-white text-sm">{notif.title}</p>
-                                                                {!notif.read && (
-                                                                    <div className="w-2 h-2 bg-red-500 rounded-full flex-shrink-0 ml-2"></div>
-                                                                )}
-                                                            </div>
-                                                            <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">{notif.message}</p>
-                                                            <p className="text-xs text-slate-400 dark:text-slate-500 mt-2">{notif.timestamp.toLocaleString()}</p>
+                                                        <div className="min-w-0">
+                                                            <p className="font-bold text-slate-900 dark:text-white text-lg">{activeNotification.title}</p>
+                                                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{activeNotification.timestamp.toLocaleString()}</p>
                                                         </div>
                                                     </div>
+                                                    <div className="mt-4 text-sm leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{activeNotification.message}</div>
+                                                    {activeNotification.ticketId && (
+                                                        <div className="mt-5 flex items-center gap-2">
+                                                            <span className="inline-flex items-center justify-center rounded-full bg-slate-100 dark:bg-slate-900 px-3 py-1 text-xs text-slate-600 dark:text-slate-300">Ticket #{activeNotification.ticketId}</span>
+                                                            <button
+                                                                onClick={() => onViewTicket?.(activeNotification.ticketId)}
+                                                                className="rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-primary-600 transition-colors"
+                                                            >
+                                                                Open Ticket
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </>
+                                            ) : (
+                                                <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 dark:text-slate-400">
+                                                    <span className="material-symbols-outlined text-4xl mb-3">notifications_none</span>
+                                                    <p className="font-semibold">Select a notification</p>
+                                                    <p className="text-xs mt-2">Notification details will appear here.</p>
                                                 </div>
-                                            ))
-                                        ) : (
-                                            <div className="p-8 text-center">
-                                                <span className="material-symbols-outlined text-slate-300 dark:text-slate-600 text-3xl block mb-2">notifications_none</span>
-                                                <p className="text-sm text-slate-500 dark:text-slate-400">No notifications yet</p>
-                                            </div>
-                                        )}
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             )}

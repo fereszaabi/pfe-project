@@ -195,17 +195,26 @@ class ClientController extends Controller
      */
     public function streamLogs(Request $request)
     {
-        $token = $request->query('token');
-        if (!$token) {
-            return response()->json(['error' => 'Missing token'], 401);
+        // Allow long-running SSE connections and keep running even if client disconnects
+        @set_time_limit(0);
+        @ignore_user_abort(true);
+
+        // Support both standard auth (middleware) and token query param (EventSource)
+        $user = $request->user();
+        if (!$user) {
+            $token = $request->query('token');
+            if (!$token) {
+                return response()->json(['error' => 'Missing token'], 401);
+            }
+
+            $accessToken = PersonalAccessToken::findToken($token);
+            if (!$accessToken) {
+                return response()->json(['error' => 'Invalid token'], 401);
+            }
+
+            $user = $accessToken->tokenable;
         }
 
-        $accessToken = PersonalAccessToken::findToken($token);
-        if (!$accessToken) {
-            return response()->json(['error' => 'Invalid token'], 401);
-        }
-
-        $user = $accessToken->tokenable;
         if (!$user || $user->role !== 'client') {
             return response()->json(['error' => 'Unauthorized'], 403);
         }

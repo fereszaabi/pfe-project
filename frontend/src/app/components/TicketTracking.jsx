@@ -115,13 +115,36 @@ export function TicketTracking({ ticketId, onBack }) {
 
     const isFetchingMessagesRef = useRef(false);
 
+    const getAuthChannels = () => {
+        const authRaw = window.localStorage.getItem('auth_user');
+        if (!authRaw) return [];
+
+        try {
+            const authUser = JSON.parse(authRaw);
+            if (!authUser?.id) return [];
+
+            const channels = [`user.user.${authUser.id}`];
+            if (authUser.role === 'employee') {
+                channels.push(`user.employee.${authUser.id}`);
+            }
+            if (authUser.role === 'client') {
+                channels.push(`user.client.${authUser.id}`);
+            }
+            return channels;
+        } catch {
+            return [];
+        }
+    };
+
     useEffect(() => {
         if (!ticketId) return;
 
         const echo = getEcho();
-        const channel = echo.private(`ticket.${ticketId}`);
+        const ticketChannel = echo.private(`ticket.${ticketId}`);
+        const userChannels = getAuthChannels();
+        const allChannels = [ticketChannel, ...userChannels.map((c) => echo.private(c))];
 
-        channel.listen('.ticket.message.created', (event) => {
+        const handleIncomingMessage = (event) => {
             const incoming = event?.message;
             if (!incoming) return;
 
@@ -146,9 +169,13 @@ export function TicketTracking({ ticketId, onBack }) {
                 setNotificationToast(newNotification);
                 setTimeout(() => setNotificationToast(null), 5000);
             }
+        };
+
+        allChannels.forEach((channel) => {
+            channel.listen('.ticket.message.created', handleIncomingMessage);
         });
 
-        channel.listen('.ticket.updated', (event) => {
+        ticketChannel.listen('.ticket.updated', (event) => {
             const updatedTicket = event?.ticket;
             if (!updatedTicket) return;
 
@@ -191,6 +218,7 @@ export function TicketTracking({ ticketId, onBack }) {
 
         return () => {
             echo.leave(`ticket.${ticketId}`);
+            userChannels.forEach((channelName) => echo.leave(channelName));
         };
     }, [ticketId]);
 

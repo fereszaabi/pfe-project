@@ -5,8 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\DB;
 use App\Models\User;
 use App\Models\Client;
+use App\Models\Machine;
 
 class RegisterController extends Controller
 {
@@ -17,31 +19,44 @@ class RegisterController extends Controller
             'email'      => 'required|string|email|max:255|unique:users',
             'cin'        => 'required|integer',
             'code_fiscal'=> 'required|string',
+            'code_anydesk' => 'required|string|max:255',
             'password'   => 'required|string|min:8|confirmed',
             'prenom'     => 'required|string|max:255',
             'numero'     => 'required|string|max:20',
         ]);
 
-        $user = User::create([
-            'name'       => $request->name,
-            'email'      => $request->email,
-            'password'   => Hash::make($request->password),
-            'role'       => 'client',
-            'cin'        => $request->cin,
-            'code_fiscal'=> $request->code_fiscal,
-        ]);
+        $result = DB::transaction(function () use ($request) {
+            $user = User::create([
+                'name'       => $request->name,
+                'email'      => $request->email,
+                'password'   => Hash::make($request->password),
+                'role'       => 'client',
+                'cin'        => $request->cin,
+                'code_fiscal'=> $request->code_fiscal,
+            ]);
 
-        $client = Client::create([
-            'nom'          => $request->name,
-            'mail'         => $request->email,
-            'password'     => Hash::make($request->password),
-            'cin'          => $request->cin,
-            'code_fiscal'  => $request->code_fiscal,
-            'prenom'       => $request->prenom,
-            'numero'       => $request->numero,
-            'money'        => 0,
-            'client_state' => 'active',
-        ]);
+            $client = Client::create([
+                'nom'          => $request->name,
+                'mail'         => $request->email,
+                'password'     => Hash::make($request->password),
+                'cin'          => $request->cin,
+                'code_fiscal'  => $request->code_fiscal,
+                'prenom'       => $request->prenom,
+                'numero'       => $request->numero,
+                'money'        => 0,
+                'client_state' => 'active',
+            ]);
+
+            Machine::create([
+                'id_client' => $client->id,
+                'nom_poste' => $request->name . ' - Main AnyDesk',
+                'code_anydesk' => $request->code_anydesk,
+            ]);
+
+            return [$user, $client];
+        });
+
+        [$user, $client] = $result;
 
         $token = $user->createToken('register-token')->plainTextToken;
 
@@ -49,6 +64,7 @@ class RegisterController extends Controller
             'message' => 'Compte créé avec succès !',
             'user'    => $user,
             'token'   => $token,
+            'profile' => $client,
         ], 201);
     }
 }

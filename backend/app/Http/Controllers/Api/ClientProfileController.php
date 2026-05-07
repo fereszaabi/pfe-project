@@ -16,8 +16,10 @@ class ClientProfileController extends Controller
     {
         $user = $request->user();
         
-        // Find the actual Client record by CIN
-        $clientRecord = Client::where('cin', $user->cin)->first();
+        // Prefer the email-linked Client record, then fall back to CIN/code fiscal.
+        $clientRecord = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if (!$clientRecord) {
             return response()->json(['message' => 'Client record not found'], 404);
@@ -41,9 +43,10 @@ class ClientProfileController extends Controller
 
         $user = $request->user();
         
-        // Find the actual Client record
-        $clientRecord = Client::where('id', $user->client_id ?? $user->id)->first() ??
-                        Client::where('cin', $user->cin)->first();
+        // Prefer the email-linked Client record, then fall back to CIN/code fiscal.
+        $clientRecord = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if (!$clientRecord) {
             return response()->json(['message' => 'Client record not found'], 404);
@@ -70,8 +73,9 @@ class ClientProfileController extends Controller
         ]);
 
         $user = $request->user();
-        $clientRecord = Client::where('id', $user->client_id ?? $user->id)->first() ??
-                        Client::where('cin', $user->cin)->first();
+        $clientRecord = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if (!$clientRecord) {
             return response()->json(['message' => 'Client record not found'], 404);
@@ -108,8 +112,9 @@ class ClientProfileController extends Controller
 
         // Verify user owns this phone number
         $user = $request->user();
-        $clientRecord = Client::where('id', $user->client_id ?? $user->id)->first() ??
-                        Client::where('cin', $user->cin)->first();
+        $clientRecord = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if ($phoneNumber->client_id !== $clientRecord->id) {
             return response()->json(['message' => 'Unauthorized'], 403);
@@ -136,8 +141,9 @@ class ClientProfileController extends Controller
 
         // Verify user owns this phone number
         $user = $request->user();
-        $clientRecord = Client::where('id', $user->client_id ?? $user->id)->first() ??
-                        Client::where('cin', $user->cin)->first();
+        $clientRecord = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if ($phoneNumber->client_id !== $clientRecord->id) {
             return response()->json(['message' => 'Unauthorized'], 403);
@@ -168,8 +174,9 @@ class ClientProfileController extends Controller
 
         // Verify user owns this phone number
         $user = $request->user();
-        $clientRecord = Client::where('id', $user->client_id ?? $user->id)->first() ??
-                        Client::where('cin', $user->cin)->first();
+        $clientRecord = Client::where('mail', $user->email)->first()
+            ?? Client::where('cin', $user->cin)->first()
+            ?? Client::where('code_fiscal', $user->code_fiscal)->first();
 
         if ($phoneNumber->client_id !== $clientRecord->id) {
             return response()->json(['message' => 'Unauthorized'], 403);

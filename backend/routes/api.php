@@ -26,10 +26,14 @@ use App\Http\Controllers\SsoController;
 |--------------------------------------------------------------------------
 */
 
+// Test route
+Route::get('/test', function () {
+    return response()->json(['status' => 'ok', 'timestamp' => now()]);
+});
+
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/register', [RegisterController::class, 'register']);
-Route::get('client/logs/stream', [ClientController::class, 'streamLogs']);
 
 // Authenticated routes
 Route::middleware('auth:sanctum')->group(function () {
@@ -42,6 +46,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('client/tickets', ClientController::class)
          ->only(['index', 'store', 'show', 'destroy']);
     Route::get('client/logs', [ClientController::class, 'getLogs']);
+    Route::get('client/logs/stream', [ClientController::class, 'streamLogs']);
         Route::patch('client/logs/{logId}/read', [ClientController::class, 'markLogRead']);
         Route::delete('client/tickets/{ticket}/image', [ClientController::class, 'deleteTicketImage']);
     Route::post('client/tickets/{ticket}/rate', [ClientController::class, 'rate']);

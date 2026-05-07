@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance, getAdminClients, getConversations, getUnreadMessages, getInsufficientFundsTickets } from '../../services/api';
+import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance, getAdminClients, getConversations, getUnreadMessages, getTicketMessages, getInsufficientFundsTickets } from '../../services/api';
 import { getStatusBadgeClasses } from '../utils/ticketStyles';
 
 export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
@@ -23,6 +23,8 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const [clientTotalPages, setClientTotalPages] = useState(1);
     const [selectedTicketDetail, setSelectedTicketDetail] = useState(null);
     const [ticketDetailLoading, setTicketDetailLoading] = useState(false);
+    const [selectedTicketMessages, setSelectedTicketMessages] = useState([]);
+    const [ticketMessagesLoading, setTicketMessagesLoading] = useState(false);
     const [showNotifications, setShowNotifications] = useState(false);
     const [notifications, setNotifications] = useState([]);
     const [notificationsLoading, setNotificationsLoading] = useState(false);
@@ -113,11 +115,30 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
         fetchData();
     };
 
+    const fetchTicketMessages = async (ticketId) => {
+        setTicketMessagesLoading(true);
+        try {
+            const response = await getTicketMessages(ticketId);
+            const messages = response?.messages || response?.data?.messages || [];
+            setSelectedTicketMessages(Array.isArray(messages) ? messages : []);
+        } catch (err) {
+            console.error('Error loading ticket conversation:', err);
+            setSelectedTicketMessages([]);
+        } finally {
+            setTicketMessagesLoading(false);
+        }
+    };
+
     const handleViewTicketDetail = async (ticketId) => {
         setTicketDetailLoading(true);
+        setSelectedTicketDetail(null);
+        setSelectedTicketMessages([]);
+
         try {
             const detail = await getAdminTicketDetail(ticketId);
-            setSelectedTicketDetail(detail?.demande ?? detail);
+            const ticketDetail = detail?.demande ?? detail;
+            setSelectedTicketDetail(ticketDetail);
+            await fetchTicketMessages(ticketId);
         } catch (err) {
             console.error('Error loading ticket details:', err);
         } finally {
@@ -652,6 +673,21 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                     />
                                 </div>
                             </div>
+                            {insufficientTickets.length > 0 && (
+                                <div className="p-6 border-b border-slate-200 dark:border-slate-800 bg-amber-50 dark:bg-amber-900/10">
+                                    <h4 className="font-semibold text-slate-900 dark:text-white">Clients in debt</h4>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">These clients have outstanding ticket requests and require balance attention.</p>
+                                    <div className="grid gap-3">
+                                        {insufficientTickets.map((ticket) => (
+                                            <div key={ticket.id} className="rounded-2xl border border-amber-200 dark:border-amber-800 p-4 bg-white dark:bg-midnight shadow-sm">
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white">{ticket.client?.nom || `Client #${ticket.id_client}`}</p>
+                                                <p className="text-xs text-slate-500 dark:text-slate-400">Ticket: {ticket.titre || ticket.description?.substring(0, 40) || 'No title'}</p>
+                                                <p className="text-xs text-amber-600 dark:text-amber-300">Balance: {Number(ticket.client?.money ?? 0).toFixed(2)} DT</p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                             <div className="overflow-x-auto">
                                 {loading ? (
                                     <div className="p-8 space-y-4">
@@ -1105,6 +1141,47 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                     <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">{selectedTicketDetail.description || 'No description provided'}</p>
                                 </div>
 
+                                {selectedTicketDetail.image && (
+                                    <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                        <h3 className="font-bold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
+                                            <span className="material-symbols-outlined text-primary">image</span>
+                                            Uploaded Image
+                                        </h3>
+                                        <div className="rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-black/5">
+                                            <img
+                                                src={selectedTicketDetail.image}
+                                                alt={`Attachment for ticket #${selectedTicketDetail.id}`}
+                                                className="w-full max-h-80 object-contain bg-slate-100 dark:bg-slate-900"
+                                            />
+                                        </div>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-3">This attachment was uploaded by the client when the ticket was created.</p>
+                                    </div>
+                                )}
+
+                                <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                    <h3 className="font-bold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
+                                        <span className="material-symbols-outlined text-primary">chat_bubble</span>
+                                        Conversation
+                                    </h3>
+                                    {ticketMessagesLoading ? (
+                                        <div className="text-sm text-slate-500">Loading conversation...</div>
+                                    ) : selectedTicketMessages.length === 0 ? (
+                                        <div className="text-sm text-slate-500">No conversation found yet for this ticket.</div>
+                                    ) : (
+                                        <div className="space-y-4">
+                                            {selectedTicketMessages.map((msg) => (
+                                                <div key={msg.id} className={`rounded-2xl p-4 ${msg.sender_type === 'client' ? 'bg-slate-100 dark:bg-slate-800' : 'bg-primary/10 dark:bg-primary/20'} `}>
+                                                    <div className="flex items-center justify-between gap-3 mb-2">
+                                                        <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{msg.sender?.name || msg.sender_type}</p>
+                                                        <span className="text-[10px] text-slate-400">{new Date(msg.created_at).toLocaleString()}</span>
+                                                    </div>
+                                                    <p className="text-sm text-slate-700 dark:text-slate-200 whitespace-pre-line">{msg.message}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
                                 {/* Client Information */}
                                 {selectedTicketDetail.client && (
                                     <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
@@ -1151,11 +1228,11 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                             </div>
                                             <div>
                                                 <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Rating</p>
-                                                <p className="text-sm font-semibold text-slate-900 dark:text-white">⭐ {(selectedTicketDetail.employee.avg_rating ?? 0).toFixed(1)}/5</p>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white">⭐ {(Number(selectedTicketDetail.employee.avg_rating) || 0).toFixed(1)}/5</p>
                                             </div>
                                             <div>
                                                 <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Avg Resolution Time</p>
-                                                <p className="text-sm text-slate-900 dark:text-white">{(selectedTicketDetail.employee.avg_resolution_hours ?? 0).toFixed(1)}h</p>
+                                                <p className="text-sm text-slate-900 dark:text-white">{(Number(selectedTicketDetail.employee.avg_resolution_hours) || 0).toFixed(1)}h</p>
                                             </div>
                                         </div>
                                     </div>
