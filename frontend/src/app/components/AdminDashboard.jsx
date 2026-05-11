@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance, getAdminClients, getConversations, getUnreadMessages, getTicketMessages, getInsufficientFundsTickets } from '../../services/api';
+import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance, getAdminClients, getConversations, getUnreadMessages, getTicketMessages, getInsufficientFundsTickets, getEmployees, assignAdminTicket } from '../../services/api';
 import { getStatusBadgeClasses } from '../utils/ticketStyles';
 
 export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
@@ -25,6 +25,13 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const [ticketDetailLoading, setTicketDetailLoading] = useState(false);
     const [selectedTicketMessages, setSelectedTicketMessages] = useState([]);
     const [ticketMessagesLoading, setTicketMessagesLoading] = useState(false);
+    const [employees, setEmployees] = useState([]);
+    const [employeesLoading, setEmployeesLoading] = useState(false);
+    const [showAssignModal, setShowAssignModal] = useState(false);
+    const [assignTicket, setAssignTicket] = useState(null);
+    const [selectedEmployeeId, setSelectedEmployeeId] = useState('');
+    const [assigningTicketId, setAssigningTicketId] = useState(null);
+    const [assignError, setAssignError] = useState('');
     const [showNotifications, setShowNotifications] = useState(false);
     const [notifications, setNotifications] = useState([]);
     const [notificationsLoading, setNotificationsLoading] = useState(false);
@@ -75,6 +82,23 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     };
 
     useEffect(() => { fetchData(); }, [ticketPage, ticketSearch, clientPage, clientSearch]);
+
+    useEffect(() => {
+        const fetchEmployeeList = async () => {
+            setEmployeesLoading(true);
+            try {
+                const data = await getEmployees();
+                setEmployees(Array.isArray(data?.employees) ? data.employees : []);
+            } catch (err) {
+                console.error('Error loading employees:', err);
+                setEmployees([]);
+            } finally {
+                setEmployeesLoading(false);
+            }
+        };
+
+        fetchEmployeeList();
+    }, []);
 
     useEffect(() => {
         if (!activeView) return;
@@ -143,6 +167,48 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
             console.error('Error loading ticket details:', err);
         } finally {
             setTicketDetailLoading(false);
+        }
+    };
+
+    const openAssignModal = (ticket) => {
+        const nextTicket = ticket || selectedTicketDetail;
+        if (!nextTicket) return;
+
+        setAssignTicket(nextTicket);
+        setSelectedEmployeeId(String(nextTicket?.employee?.id ?? nextTicket?.id_employee ?? ''));
+        setAssignError('');
+        setShowAssignModal(true);
+    };
+
+    const closeAssignModal = () => {
+        setShowAssignModal(false);
+        setAssignTicket(null);
+        setSelectedEmployeeId('');
+        setAssignError('');
+    };
+
+    const handleAssignTicket = async () => {
+        if (!assignTicket || !selectedEmployeeId) {
+            setAssignError('Please choose an employee to assign this ticket.');
+            return;
+        }
+
+        const ticketId = assignTicket.id;
+        setAssigningTicketId(ticketId);
+        setAssignError('');
+
+        try {
+            await assignAdminTicket(ticketId, Number(selectedEmployeeId));
+            closeAssignModal();
+            if (selectedTicketDetail?.id === ticketId) {
+                await handleViewTicketDetail(ticketId);
+            }
+            fetchData();
+        } catch (err) {
+            console.error('Error assigning ticket:', err);
+            setAssignError(err?.message || err?.error || 'Unable to assign ticket.');
+        } finally {
+            setAssigningTicketId(null);
         }
     };
 
@@ -725,12 +791,20 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                                     </td>
                                                     <td className="px-6 py-4 text-sm text-slate-500 font-medium">{new Date(ticket.created_at).toLocaleDateString()}</td>
                                                     <td className="px-6 py-4 text-center">
-                                                        <button 
-                                                            onClick={() => handleViewTicketDetail(ticket.id)}
-                                                            className="text-[10px] font-black uppercase text-primary hover:underline hover:text-primary/80 tracking-widest transition-all"
-                                                        >
-                                                            VIEW
-                                                        </button>
+                                                        <div className="flex items-center justify-center gap-3">
+                                                            <button 
+                                                                onClick={() => handleViewTicketDetail(ticket.id)}
+                                                                className="text-[10px] font-black uppercase text-slate-500 hover:underline hover:text-slate-800 dark:hover:text-white tracking-widest transition-all"
+                                                            >
+                                                                VIEW
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => openAssignModal(ticket)}
+                                                                className="text-[10px] font-black uppercase text-primary hover:underline hover:text-primary/80 tracking-widest transition-all"
+                                                            >
+                                                                ASSIGN
+                                                            </button>
+                                                        </div>
                                                     </td>
                                                 </tr>
                                             ))}
@@ -1211,12 +1285,20 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                 )}
 
                                 {/* Employee Assignment */}
-                                {selectedTicketDetail.employee && (
-                                    <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
-                                        <h3 className="font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                                <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
+                                    <div className="flex items-center justify-between gap-3 mb-4">
+                                        <h3 className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
                                             <span className="material-symbols-outlined text-primary">engineering</span>
                                             Assigned Employee
                                         </h3>
+                                        <button
+                                            onClick={() => openAssignModal(selectedTicketDetail)}
+                                            className="px-3 py-2 rounded-lg bg-primary hover:bg-orange-600 text-white text-xs font-bold uppercase tracking-wider transition-colors"
+                                        >
+                                            Assign / Reassign
+                                        </button>
+                                    </div>
+                                    {selectedTicketDetail.employee ? (
                                         <div className="grid grid-cols-2 gap-4">
                                             <div>
                                                 <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Employee Name</p>
@@ -1235,8 +1317,10 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                                 <p className="text-sm text-slate-900 dark:text-white">{(Number(selectedTicketDetail.employee.avg_resolution_hours) || 0).toFixed(1)}h</p>
                                             </div>
                                         </div>
-                                    </div>
-                                )}
+                                    ) : (
+                                        <p className="text-sm text-slate-500">This ticket is not assigned yet.</p>
+                                    )}
+                                </div>
 
                                 {/* Timeline Information */}
                                 <div className="bg-slate-50 dark:bg-midnight rounded-xl p-4">
@@ -1413,6 +1497,100 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                 className="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-900 dark:text-white font-semibold transition-colors"
                             >
                                 Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Assign Ticket Modal */}
+            {showAssignModal && assignTicket && (
+                <div className="fixed inset-0 bg-black/55 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-midnight-accent rounded-2xl shadow-2xl max-w-2xl w-full border border-slate-200 dark:border-slate-800 max-h-[90vh] overflow-y-auto">
+                        <div className="sticky top-0 p-6 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-midnight-accent flex items-center justify-between">
+                            <div>
+                                <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
+                                    <span className="material-symbols-outlined text-primary">manage_accounts</span>
+                                    Assign Ticket
+                                </h2>
+                                <p className="text-sm text-slate-500 mt-1">Ticket #{String(assignTicket.id).slice(0, 8)} · {assignTicket.titre || 'Untitled ticket'}</p>
+                            </div>
+                            <button
+                                onClick={closeAssignModal}
+                                className="size-8 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 flex items-center justify-center transition-colors"
+                            >
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-5">
+                            {assignError && (
+                                <div className="rounded-xl border border-rose-200 bg-rose-50 text-rose-700 px-4 py-3 text-sm font-medium">
+                                    {assignError}
+                                </div>
+                            )}
+
+                            <div className="rounded-xl bg-slate-50 dark:bg-midnight p-4">
+                                <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Current Assignment</p>
+                                <p className="text-sm text-slate-700 dark:text-slate-300">
+                                    {assignTicket.employee?.nom || assignTicket.employee?.name || 'Unassigned'}
+                                </p>
+                            </div>
+
+                            <div>
+                                <h3 className="font-bold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
+                                    <span className="material-symbols-outlined text-primary">groups</span>
+                                    Select Employee
+                                </h3>
+                                {employeesLoading ? (
+                                    <div className="p-6 text-center text-sm text-slate-500">Loading employees...</div>
+                                ) : employees.length === 0 ? (
+                                    <div className="p-6 text-center text-sm text-slate-500">No employees available to assign.</div>
+                                ) : (
+                                    <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                                        {employees.map((employee) => {
+                                            const employeeId = String(employee.id);
+                                            const isSelected = selectedEmployeeId === employeeId;
+                                            return (
+                                                <button
+                                                    key={employee.id}
+                                                    onClick={() => setSelectedEmployeeId(employeeId)}
+                                                    className={`w-full text-left rounded-2xl border p-4 transition-all ${isSelected ? 'border-primary bg-primary/5 shadow-sm' : 'border-slate-200 dark:border-slate-800 hover:border-primary/50 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
+                                                >
+                                                    <div className="flex items-start justify-between gap-4">
+                                                        <div>
+                                                            <div className="flex items-center gap-2 flex-wrap">
+                                                                <p className="font-bold text-slate-900 dark:text-white">{employee.nom || employee.name || `Employee #${employee.id}`}</p>
+                                                                {isSelected && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-primary/10 text-primary">Selected</span>}
+                                                            </div>
+                                                            <p className="text-sm text-slate-500 mt-1">{employee.mail || employee.email || 'No email'}</p>
+                                                            <p className="text-xs text-slate-400 mt-1">Workload: {employee.current_workload ?? 0} · Rating: {(Number(employee.avg_rating) || 0).toFixed(1)}/5</p>
+                                                        </div>
+                                                        <span className={`size-5 rounded-full border flex items-center justify-center ${isSelected ? 'border-primary bg-primary' : 'border-slate-300 dark:border-slate-600'}`}>
+                                                            {isSelected && <span className="size-2.5 rounded-full bg-white"></span>}
+                                                        </span>
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="border-t border-slate-200 dark:border-slate-800 p-6 bg-slate-50/50 dark:bg-midnight/50 flex justify-end gap-3">
+                            <button
+                                onClick={closeAssignModal}
+                                className="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-900 dark:text-white font-semibold transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleAssignTicket}
+                                disabled={!selectedEmployeeId || assigningTicketId === assignTicket.id}
+                                className="px-4 py-2 rounded-lg bg-primary hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold transition-colors"
+                            >
+                                {assigningTicketId === assignTicket.id ? 'Assigning...' : 'Assign Ticket'}
                             </button>
                         </div>
                     </div>

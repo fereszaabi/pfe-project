@@ -11,6 +11,7 @@ use App\Models\Client;
 use App\Events\TicketUpdated;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Cache;
 
@@ -180,6 +181,43 @@ class AdminUserController extends Controller
                 }
             }
         }
+
+        $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
+        broadcast(new TicketUpdated($updatedTicket))->toOthers();
+
+        return response()->json([
+            'ok' => true,
+            'demande' => $updatedTicket,
+        ]);
+    }
+
+    public function assignTicket(Request $request, Demande $demande)
+    {
+        $validated = $request->validate([
+            'employee_id' => 'required|integer|exists:employees,id',
+        ]);
+
+        $employee = Employee::findOrFail($validated['employee_id']);
+        $previousEmployeeId = $demande->id_employee;
+
+        DB::transaction(function () use ($demande, $employee, $previousEmployeeId) {
+            if ($previousEmployeeId && (int) $previousEmployeeId !== (int) $employee->id) {
+                $previousEmployee = Employee::find($previousEmployeeId);
+                if ($previousEmployee && $previousEmployee->current_workload > 0) {
+                    $previousEmployee->decrement('current_workload');
+                }
+            }
+
+            if ((int) $previousEmployeeId !== (int) $employee->id) {
+                $employee->increment('current_workload');
+            }
+
+            $demande->update([
+                'id_employee' => $employee->id,
+                'assigned_at' => Carbon::now(),
+                'status' => 'assigned',
+            ]);
+        });
 
         $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
         broadcast(new TicketUpdated($updatedTicket))->toOthers();

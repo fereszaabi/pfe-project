@@ -49,6 +49,45 @@ We would like to extend our thanks to the following sponsors for funding Laravel
 - **[byte5](https://byte5.de)**
 - **[OP.GG](https://op.gg)**
 
+## Mail configuration
+
+To send real email from this app, configure the SMTP settings in `backend/.env`:
+
+- `MAIL_MAILER=smtp`
+- `MAIL_HOST=<your-smtp-host>`
+- `MAIL_PORT=<smtp-port>`
+- `MAIL_USERNAME=<smtp-username>`
+- `MAIL_PASSWORD=<smtp-password>`
+- `MAIL_ENCRYPTION=tls`
+- `MAIL_FROM_ADDRESS="noreply@your-domain.com"`
+- `MAIL_FROM_NAME="${APP_NAME}"
+
+### Example SMTP providers
+
+#### Mailtrap (recommended for development/testing)
+
+```env
+MAIL_HOST=smtp.mailtrap.io
+MAIL_PORT=2525
+MAIL_USERNAME=your_mailtrap_username
+MAIL_PASSWORD=your_mailtrap_password
+MAIL_ENCRYPTION=tls
+```
+
+#### Gmail SMTP
+
+```env
+MAIL_HOST=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USERNAME=your@gmail.com
+MAIL_PASSWORD=your_app_password
+MAIL_ENCRYPTION=tls
+```
+
+> For Gmail, use an app password if 2FA is enabled on your Google account.
+
+You can also use providers like SendGrid, Mailgun, or Postmark by pasting the credentials from the provider into the `.env` file.
+
 ## Contributing
 
 Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).

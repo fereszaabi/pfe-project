@@ -108,6 +108,9 @@ class ClientController extends Controller
                 'client_rating',
                 'rating_comment',
                 'created_at',
+                'updated_at',
+                'assigned_at',
+                'id_employee',
                 'image',
             ]);
 

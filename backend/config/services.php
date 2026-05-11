@@ -37,18 +37,4 @@ return [
         'timeout' => env('CHATBOT_TIMEOUT', 20),
     ],
 
-    /*
-    |--------------------------------------------------------------------------
-    | Cloudflare Turnstile (CAPTCHA)
-    |--------------------------------------------------------------------------
-    | Get your keys at: https://dash.cloudflare.com/ → Turnstile
-    | Add to your .env file:
-    |   TURNSTILE_SITE_KEY=your_site_key
-    |   TURNSTILE_SECRET_KEY=your_secret_key
-    */
-    'turnstile' => [
-        'site'   => env('TURNSTILE_SITE_KEY'),
-        'secret' => env('TURNSTILE_SECRET_KEY'),
-    ],
-
 ];

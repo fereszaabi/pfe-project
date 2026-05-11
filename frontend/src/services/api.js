@@ -1,4 +1,5 @@
-const BASE = 'http://127.0.0.1:8000/api';
+const API_ROOT = import.meta.env.VITE_API_ROOT || '';
+const BASE = API_ROOT ? `${API_ROOT.replace(/\/$/, '')}/api` : '/api';
 
 function getToken() {
     return localStorage.getItem('auth_token');
@@ -75,8 +76,20 @@ function buildQuery(params = {}) {
 }
 
 // ── Auth ────────────────────────────────────────────────────────────
-export const login = (identifier, password) =>
-    apiRequest('POST', '/login', { identifier, password });
+export const login = (identifier, password, captchaToken, captchaAnswer) =>
+    apiRequest('POST', '/login', { identifier, password, captcha_token: captchaToken, captcha_answer: captchaAnswer });
+
+export const getCaptchaChallenge = () =>
+    apiRequest('GET', '/captcha/challenge');
+
+export const verifyCaptcha = (token, answer) =>
+    apiRequest('POST', '/captcha/verify', { captcha_token: token, captcha_answer: answer });
+
+export const verifyLoginOtp = (loginToken, otp) =>
+    apiRequest('POST', '/login/verify-otp', { login_token: loginToken, otp });
+
+export const sendRegisterVerificationCode = (data) =>
+    apiRequest('POST', '/register/send-code', data);
 
 export const register = (data) =>
     apiRequest('POST', '/register', data);
@@ -224,6 +237,9 @@ export const updateClient = (id, data) =>
 
 export const updateDemandeStatus = (id, data) =>
     apiRequest('PATCH', `/admin/demandes/${id}/status`, data);
+
+export const assignAdminTicket = (id, employeeId) =>
+    apiRequest('PATCH', `/admin/demandes/${id}/assign`, { employee_id: employeeId });
 
 export const deleteUser = (id) =>
     apiRequest('DELETE', `/admin/users/${id}`);

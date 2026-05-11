@@ -1,10 +1,12 @@
 import { useState } from 'react';
+import * as api from '../../services/api';
 
 export function Register({ onRegister, onSwitchToLogin }) {
     const [formData, setFormData] = useState({
         name: '',
         prenom: '',
         email: '',
+        email_code: '',
         cin: '',
         code_fiscal: '',
         code_anydesk: '',
@@ -13,14 +15,24 @@ export function Register({ onRegister, onSwitchToLogin }) {
         password_confirmation: ''
     });
     const [error, setError] = useState('');
+    const [info, setInfo] = useState('');
+    const [codeSending, setCodeSending] = useState(false);
 
     const handleSubmit = (e) => {
         e.preventDefault();
         setError('');
+        setInfo('');
+
         if (formData.password !== formData.password_confirmation) {
             setError('Passwords do not match.');
             return;
         }
+
+        if (!formData.email_code) {
+            setError('Please enter the verification code sent to your email.');
+            return;
+        }
+
         onRegister(formData, setError);
     };
 
@@ -29,6 +41,30 @@ export function Register({ onRegister, onSwitchToLogin }) {
             ...formData,
             [e.target.name]: e.target.value
         });
+    };
+
+    const handleSendCode = async () => {
+        setError('');
+        setInfo('');
+
+        if (!formData.email) {
+            setError('Please enter a valid email address before requesting a verification code.');
+            return;
+        }
+
+        setCodeSending(true);
+        try {
+            const data = await api.sendRegisterVerificationCode({ email: formData.email });
+            const debugCode = data?.debug_code ? ` ${data.debug_code}` : '';
+            setInfo((data.message || 'Verification code sent to your email.') + debugCode);
+        } catch (err) {
+            const messages = err?.errors
+                ? Object.values(err.errors).flat().join(' ')
+                : err?.message || 'Unable to send verification code. Please check your email and try again.';
+            setError(messages);
+        } finally {
+            setCodeSending(false);
+        }
     };
 
     return (
@@ -202,15 +238,50 @@ export function Register({ onRegister, onSwitchToLogin }) {
                                     <span className="material-symbols-outlined text-lg opacity-60">mail</span>
                                     Email Address
                                 </label>
+                                <div className="flex gap-3">
+                                    <input
+                                        name="email"
+                                        type="email"
+                                        required
+                                        value={formData.email}
+                                        onChange={handleChange}
+                                        className="w-full rounded-lg border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:border-primary focus:ring-primary h-12 px-4 placeholder:text-slate-400 transition-colors"
+                                        placeholder="client@company.com"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={handleSendCode}
+                                        disabled={codeSending}
+                                        className="whitespace-nowrap rounded-lg bg-primary px-4 text-white font-semibold transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+                                    >
+                                        {codeSending ? 'Sending…' : 'Send Code'}
+                                    </button>
+                                </div>
+                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                    A 6-digit verification code will be sent to the email above.
+                                </p>
+                            </div>
+
+                            {/* Email verification code */}
+                            <div className="flex flex-col gap-2">
+                                <label className="text-slate-700 dark:text-slate-200 text-sm font-semibold flex items-center gap-2">
+                                    <span className="material-symbols-outlined text-lg opacity-60">verified</span>
+                                    Verification Code
+                                </label>
                                 <input
-                                    name="email"
-                                    type="email"
+                                    name="email_code"
+                                    type="text"
+                                    inputMode="numeric"
+                                    pattern="[0-9]*"
                                     required
-                                    value={formData.email}
+                                    value={formData.email_code}
                                     onChange={handleChange}
                                     className="w-full rounded-lg border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:border-primary focus:ring-primary h-12 px-4 placeholder:text-slate-400 transition-colors"
-                                    placeholder="client@company.com"
+                                    placeholder="123456"
                                 />
+                                {info && (
+                                    <p className="text-xs text-emerald-600 dark:text-emerald-400">{info}</p>
+                                )}
                             </div>
 
                             {/* Phone */}

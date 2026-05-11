@@ -33,6 +33,10 @@ Route::get('/test', function () {
 
 // Public routes
 Route::post('/login', [AuthController::class, 'login']);
+Route::post('/login/verify-otp', [AuthController::class, 'verifyOtp']);
+Route::get('/captcha/challenge', [AuthController::class, 'captchaChallenge']);
+Route::post('/captcha/verify', [AuthController::class, 'verifyCaptcha']);
+Route::post('/register/send-code', [RegisterController::class, 'sendVerificationCode']);
 Route::post('/register', [RegisterController::class, 'register']);
 
 // Authenticated routes
@@ -87,6 +91,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/admin/users', [AdminUserController::class, 'store']);
         Route::patch('/admin/clients/{client}', [AdminUserController::class, 'update']);
         Route::patch('/admin/demandes/{demande}/status', [AdminUserController::class, 'update_statu']);
+        Route::patch('/admin/demandes/{demande}/assign', [AdminUserController::class, 'assignTicket']);
         Route::delete('/admin/users/{user}', [AdminUserController::class, 'destroy']);
         Route::patch('/admin/clients/{client}/take-money', [AdminUserController::class, 'takeMoney']);
         Route::patch('/admin/clients/{client}/balance', [AdminUserController::class, 'updateBalance']);
