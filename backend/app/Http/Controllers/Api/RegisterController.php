@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use App\Services\LocalOtpCodeStore;
 use App\Models\User;
 use App\Models\Client;
 use App\Models\Machine;
@@ -26,6 +27,10 @@ class RegisterController extends Controller
         $cacheKey = 'register_email_code:' . $email;
 
         try {
+            app(LocalOtpCodeStore::class)->record('register', $request->email, $code, [
+                'cache_key' => $cacheKey,
+            ]);
+
             Mail::to($request->email)->send(new \App\Mail\OtpMail($code, $request->email));
 
             if (count(Mail::failures()) > 0) {

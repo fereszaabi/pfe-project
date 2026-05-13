@@ -1191,7 +1191,9 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                 {selectedTicket.image && (
                                     <div>
                                         <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Attached Image</label>
-                                        <img src={resolveTicketImageUrl(selectedTicket.image)} alt="Ticket attachment" className="rounded-lg max-h-48 w-full object-cover" />
+                                        <div className="rounded-xl border border-slate-200 dark:border-[#3a2f27] bg-slate-100 dark:bg-[#181411] p-2">
+                                            <img src={resolveTicketImageUrl(selectedTicket.image)} alt="Ticket attachment" className="rounded-lg max-h-[32rem] w-full object-contain" />
+                                        </div>
                                     </div>
                                 )}
 

@@ -107,6 +107,9 @@ export const getClientTickets = (params) =>
 export const getClientTicket = (id) =>
     apiRequest('GET', `/client/tickets/${id}`);
 
+export const sendTicketOtp = () =>
+    apiRequest('POST', '/client/tickets/send-otp');
+
 export const createTicket = (formData) =>
     apiUpload('POST', '/client/tickets', formData);
 
@@ -226,6 +229,9 @@ export const getAdminTicketDetail = (id) =>
 export const getAdminStats = () =>
     apiRequest('GET', '/admin/stats');
 
+export const getAdminOtpCodes = (limit = 20) =>
+    apiRequest('GET', `/admin/otp-codes?limit=${encodeURIComponent(limit)}`);
+
 export const getAdminClients = (params) =>
     apiRequest('GET', `/admin/clients${buildQuery(params)}`);
 
@@ -252,6 +258,12 @@ export const updateClientBalance = (id, amount, operation = 'set') =>
 
 export const getInsufficientFundsTickets = () =>
     apiRequest('GET', '/admin/tickets/insufficient-funds');
+
+export const adminBlockTicket = (ticketId) =>
+    apiRequest('POST', `/admin/tickets/${ticketId}/block`);
+
+export const adminUnblockTicket = (ticketId) =>
+    apiRequest('POST', `/admin/tickets/${ticketId}/unblock`);
 
 // ── Employee Management ──────────────────────────────────────────────
 export const getEmployees = () =>
@@ -309,3 +321,19 @@ export const getWebhookStatus = () =>
 
 export const retryFailedWebhooks = () =>
     apiRequest('POST', '/webhooks/retry');
+
+// ── Client Profile ──────────────────────────────────────────────────
+export const updateClientProfile = (data) =>
+    apiRequest('PATCH', '/client/profile', data);
+
+export const contactSupport = (subject, message) =>
+    apiRequest('POST', '/client/support/contact', { subject, message });
+
+export const startSupportConversation = (subject = 'Balance Top-up Inquiry') =>
+    apiRequest('POST', '/messages/start-support', { subject });
+// ── Notifications ───────────────────────────────────────────────
+export const notifyEmployeeAssignment = (employeeId, ticketId, ticketTitle) =>
+    apiRequest('POST', '/employee/notify/assignment', { employee_id: employeeId, ticket_id: ticketId, ticket_title: ticketTitle });
+
+export const notifyEmployeeReassignment = (employeeId, ticketId, ticketTitle, previousEmployeeId = null) =>
+    apiRequest('POST', '/employee/notify/reassignment', { employee_id: employeeId, ticket_id: ticketId, ticket_title: ticketTitle, previous_employee_id: previousEmployeeId });

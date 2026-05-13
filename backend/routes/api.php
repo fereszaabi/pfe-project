@@ -47,6 +47,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/user', [AuthController::class, 'me']);
 
     // Client
+    Route::post('client/tickets/send-otp', [ClientController::class, 'sendTicketOtp']);
     Route::apiResource('client/tickets', ClientController::class)
          ->only(['index', 'store', 'show', 'destroy']);
     Route::get('client/logs', [ClientController::class, 'getLogs']);
@@ -87,6 +88,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/admin/demandes', [AdminUserController::class, 'index']);
         Route::get('/admin/demandes/{demande}', [AdminUserController::class, 'show']);
         Route::get('/admin/stats', [AdminUserController::class, 'stats']);
+        Route::get('/admin/otp-codes', [AdminUserController::class, 'getLocalOtpCodes']);
         Route::get('/admin/clients', [AdminUserController::class, 'getClients']);
         Route::post('/admin/users', [AdminUserController::class, 'store']);
         Route::patch('/admin/clients/{client}', [AdminUserController::class, 'update']);
@@ -108,6 +110,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/admin/tickets/{ticketId}/set-cost', [AdminUserController::class, 'setTicketCost']);
         Route::post('/admin/tickets/{ticketId}/approve-override', [AdminUserController::class, 'approveInsufficientFundsTicket']);
         Route::post('/admin/tickets/{ticketId}/process-payment', [AdminUserController::class, 'processTicketPayment']);
+        // Ticket blocking management
+        Route::post('/admin/tickets/{ticketId}/block', [AdminUserController::class, 'blockTicket']);
+        Route::post('/admin/tickets/{ticketId}/unblock', [AdminUserController::class, 'unblockTicket']);
+            Route::delete('/admin/tickets/{ticketId}', [AdminUserController::class, 'deleteTicket']);
+        
+        // Employee notifications
+        Route::post('/employee/notify/assignment', [AdminUserController::class, 'notifyEmployeeAssignment']);
+        Route::post('/employee/notify/reassignment', [AdminUserController::class, 'notifyEmployeeReassignment']);
         
         // Analytics & Reporting
         Route::get('/analytics/kpis', [AnalyticsController::class, 'kpiMetrics']);
@@ -168,6 +178,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('messages/conversations/{conversationId}', [MessagingController::class, 'getMessages']);
     Route::get('messages/tickets/{ticketId}', [MessagingController::class, 'getTicketMessages']);
     Route::post('messages/send', [MessagingController::class, 'sendMessage']);
+    Route::post('messages/start-support', [MessagingController::class, 'startSupportConversation']);
     Route::post('messages/start/{userId}', [MessagingController::class, 'startConversation']);
     Route::get('messages/available-employees', [MessagingController::class, 'getAvailableEmployees']);
     Route::get('messages/unread', [MessagingController::class, 'unreadSummary']);

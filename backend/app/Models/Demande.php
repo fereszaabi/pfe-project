@@ -46,6 +46,7 @@ class Demande extends Model
         'admin_approved_override',
         'escalated_to',
         'escalated_at',
+        'blocked',
     ];
 
     protected $casts = [

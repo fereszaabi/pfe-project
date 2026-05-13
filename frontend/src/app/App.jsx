@@ -105,9 +105,6 @@ export default function App() {
     const handleLogin = async (identifier, password, captchaToken, captchaAnswer) => {
         try {
             const data = await api.login(identifier, password, captchaToken, captchaAnswer);
-            if (data?.two_factor_required) {
-                return data;
-            }
 
             localStorage.setItem('auth_token', data.token);
             localStorage.setItem('auth_user', JSON.stringify(data.user));
@@ -118,22 +115,6 @@ export default function App() {
             const messages = err?.errors
                 ? Object.values(err.errors).flat().join(' ')
                 : err?.message || 'Invalid credentials. Please try again.';
-            throw new Error(messages);
-        }
-    };
-
-    const handleVerifyOtp = async (loginToken, otp) => {
-        try {
-            const data = await api.verifyLoginOtp(loginToken, otp);
-            localStorage.setItem('auth_token', data.token);
-            localStorage.setItem('auth_user', JSON.stringify(data.user));
-            setCurrentUser(data.user);
-            navigate('dashboard');
-            return data;
-        } catch (err) {
-            const messages = err?.errors
-                ? Object.values(err.errors).flat().join(' ')
-                : err?.message || 'Verification failed. Please try again.';
             throw new Error(messages);
         }
     };
@@ -169,7 +150,6 @@ export default function App() {
         return (
             <Login
                 onLogin={handleLogin}
-                onVerifyOtp={handleVerifyOtp}
                 onSwitchToRegister={() => setView('register')}
             />
         );

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot, getClientProfile, getClientLogs, getClientLogsStreamUrl, markClientLogRead, deleteTicketImage, getSupportBotHistory, saveSupportBotHistory, getHelpArticles } from '../../services/api';
+import { getClientTickets, createTicket, rateEmployee, getMachines, getUnreadMessages, askSupportBot, getClientProfile, getClientLogs, getClientLogsStreamUrl, markClientLogRead, deleteTicketImage, getSupportBotHistory, saveSupportBotHistory, getHelpArticles, sendTicketOtp } from '../../services/api';
 import { getStatusBadgeClasses, getPriorityBadgeClasses } from '../utils/ticketStyles';
 import { getEcho } from '../../services/realtime';
 
@@ -64,6 +64,11 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         priority: 'low',
         image: null
     });
+    const [showTicketOtpPrompt, setShowTicketOtpPrompt] = useState(false);
+    const [ticketOtpCode, setTicketOtpCode] = useState('');
+    const [ticketOtpError, setTicketOtpError] = useState('');
+    const [isOtpSending, setIsOtpSending] = useState(false);
+    const [pendingTicketData, setPendingTicketData] = useState(null);
 
     const priorityFees = { low: 10, medium: 20, high: 25, urgent: 30 };
 
@@ -577,6 +582,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
     const submitTicket = async (ticketData, useNewMachine = createNewMachine) => {
         setSubmitError('');
+        setTicketOtpError('');
 
         // Validate machine selection
         if (!useNewMachine && !ticketData.machine_id) {
@@ -599,8 +605,39 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             });
         }
 
+        // Store pending data and request OTP
+        setPendingTicketData({ ticketData, useNewMachine });
+        setShowTicketOtpPrompt(true);
+        setTicketOtpCode('');
+        setIsOtpSending(true);
+
+        try {
+            const response = await sendTicketOtp();
+            setTicketOtpError('');
+        } catch (err) {
+            const errorMsg = err?.message || 'Failed to send verification code. Please try again.';
+            setTicketOtpError(errorMsg);
+            setPendingTicketData(null);
+            setShowTicketOtpPrompt(false);
+        } finally {
+            setIsOtpSending(false);
+        }
+    };
+
+    const submitTicketWithOtp = async () => {
+        if (!ticketOtpCode.trim()) {
+            setTicketOtpError('Please enter the verification code');
+            return;
+        }
+
+        if (!pendingTicketData) {
+            setTicketOtpError('Ticket data lost. Please try again.');
+            return;
+        }
+
+        const { ticketData, useNewMachine } = pendingTicketData;
         setIsSubmittingTicket(true);
-        setShowCreateTicket(false);
+        setShowTicketOtpPrompt(false);
         setTicketNotice({
             title: 'Creating ticket',
             message: 'Your ticket is being created. Please wait...',
@@ -609,6 +646,8 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         });
 
         const fd = buildTicketFormData(ticketData, useNewMachine);
+        fd.append('otp_code', ticketOtpCode);
+
         try {
             const response = await createTicket(fd);
             const refreshedBalance = Number(response?.client_balance ?? NaN);
@@ -648,25 +687,14 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     : 'Your ticket has been submitted successfully.',
                 deadline: response?.payment_deadline || null,
                 processing: false,
-                confirmLabel: 'Okay',
             });
         } catch (err) {
-            if (err?.message === 'Unauthenticated.') {
-                setSubmitError('Session expired. Please sign in again.');
-                await onLogout?.();
-                setTicketNotice(null);
-                setShowCreateTicket(true);
-                return;
-            }
-
-            const msg = err?.errors
-                ? Object.values(err.errors).flat().join(' ')
-                : err?.message || 'Failed to submit ticket.';
-            setSubmitError(msg);
-            setTicketNotice(null);
-            setShowCreateTicket(true);
+            const messages = err?.errors ? Object.values(err.errors).flat().join(' ') : err?.error || err?.message || 'Failed to create ticket';
+            setTicketOtpError(messages);
+            setShowTicketOtpPrompt(true);
         } finally {
             setIsSubmittingTicket(false);
+            setPendingTicketData(null);
         }
     };
 
@@ -1269,6 +1297,63 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                         </div>
                     )}
 
+                    {/* OTP Verification Modal */}
+                    {showTicketOtpPrompt && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+                            <div className="bg-white dark:bg-surface-dark rounded-xl shadow-xl w-full max-w-md p-8">
+                                <div className="text-center mb-6">
+                                    <span className="material-symbols-outlined text-4xl text-primary mb-3 block">verified_user</span>
+                                    <h3 className="text-xl font-bold text-slate-900 dark:text-white">Verify Your Identity</h3>
+                                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">
+                                        A verification code has been sent to your email address.
+                                    </p>
+                                </div>
+
+                                <div className="space-y-4">
+                                    <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        pattern="[0-9]*"
+                                        value={ticketOtpCode}
+                                        onChange={(e) => {
+                                            setTicketOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                                            setTicketOtpError('');
+                                        }}
+                                        placeholder="000000"
+                                        className="w-full rounded-lg border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-center text-2xl font-mono tracking-widest focus:border-primary focus:ring-primary h-14 transition-colors"
+                                    />
+                                    {ticketOtpError && (
+                                        <p className="text-sm text-red-600 dark:text-red-400">{ticketOtpError}</p>
+                                    )}
+                                </div>
+
+                                <div className="flex gap-3 mt-6">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setShowTicketOtpPrompt(false);
+                                            setTicketOtpCode('');
+                                            setTicketOtpError('');
+                                            setPendingTicketData(null);
+                                        }}
+                                        disabled={isSubmittingTicket}
+                                        className="flex-1 px-4 py-2.5 border border-slate-300 dark:border-slate-700 rounded-lg font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={submitTicketWithOtp}
+                                        disabled={isSubmittingTicket || !ticketOtpCode.trim()}
+                                        className="flex-1 px-4 py-2.5 bg-primary text-white rounded-lg font-semibold hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        {isSubmittingTicket ? 'Verifying...' : 'Verify & Submit'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Recent Tickets Table */}
                     <div ref={ticketsSectionRef} className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
                         <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -1381,7 +1466,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                                     )}
                                                 </td>
                                             </tr>
-                                        ))}
+                                         ))}
                                     </tbody>
                                 </table>
                             )}

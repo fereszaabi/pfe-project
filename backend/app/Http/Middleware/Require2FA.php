@@ -26,10 +26,20 @@ class Require2FA
         $sessionKey = '2fa_verified_' . md5($request->url());
 
         if (!session($sessionKey)) {
-            // Generate and cache OTP (10 minute expiry)
-            $otp = rand(100000, 999999);
             $cacheKey = '2fa_otp_' . $user->id;
-            Cache::put($cacheKey, $otp, now()->addMinutes(10));
+
+            if (!Cache::has($cacheKey)) {
+                $otp = rand(100000, 999999);
+                Cache::put($cacheKey, $otp, now()->addMinutes(10));
+                try {
+                    Mail::to($user->email)->send(new OtpMail($otp, $user->name));
+                } catch (\Throwable $e) {
+                    report($e);
+                    return redirect()->route('login')->withErrors([
+                        'email' => 'Unable to send verification email. Please start your local SMTP server on 127.0.0.1:1025.',
+                    ]);
+                }
+            }
 
             // Store the intended URL and method
             session([
@@ -38,9 +48,6 @@ class Require2FA
                 '2fa_form_data'       => $request->except(['_token', '_method']),
                 '2fa_session_key'     => $sessionKey,
             ]);
-
-            // Send OTP email
-            Mail::to($user->email)->send(new OtpMail($otp, $user->name));
 
             return redirect()->route('2fa.challenge')
                 ->with('info', 'A verification code has been sent to ' . $user->email);

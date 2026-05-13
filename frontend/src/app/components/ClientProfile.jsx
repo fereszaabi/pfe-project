@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getClientMachines, createMachine, updateMachine, deleteMachine, getClientProfile } from '../../services/api';
+import { getClientMachines, createMachine, updateMachine, deleteMachine, getClientProfile, updateClientProfile, startSupportConversation } from '../../services/api';
 
 export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
     const [showPassword, setShowPassword] = useState(false);
@@ -20,6 +20,11 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
     const [savingCode, setSavingCode] = useState(false);
     const [deleteError, setDeleteError] = useState(null);
     const [clientBalance, setClientBalance] = useState(Number(user?.money ?? 0));
+    const [showBankingModal, setShowBankingModal] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+    const [saveError, setSaveError] = useState('');
+    const [saveSuccess, setSaveSuccess] = useState('');
+    const [isContacting, setIsContacting] = useState(false);
 
     // Load machines on component mount
     useEffect(() => {
@@ -50,16 +55,40 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
         try {
             setLoadingMachines(true);
             const data = await getClientMachines();
-            setAnydeskCodes(data);
+            const machines = Array.isArray(data)
+                ? data
+                : Array.isArray(data?.machines)
+                    ? data.machines
+                    : [];
+            setAnydeskCodes(machines);
         } catch (err) {
             console.error('Error loading machines:', err);
+            setAnydeskCodes([]);
         } finally {
             setLoadingMachines(false);
         }
     };
 
-    const handleSaveProfile = () => {
-        console.log('Saving profile:', profileData);
+    const handleSaveProfile = async () => {
+        setSaveError('');
+        setSaveSuccess('');
+        setIsSaving(true);
+        
+        try {
+            await updateClientProfile({
+                nom: profileData.businessName,
+                email: profileData.email,
+                phone: profileData.phone,
+                business_type: profileData.businessType,
+            });
+            setSaveSuccess('Profile updated successfully!');
+            setTimeout(() => setSaveSuccess(''), 3000);
+        } catch (err) {
+            setSaveError(err.message || 'Failed to save profile');
+            console.error('Error saving profile:', err);
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     const handleAddAnydeskCode = () => {
@@ -99,6 +128,21 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
 
     const handleCopyCode = (code) => {
         navigator.clipboard.writeText(code);
+    };
+
+    const handleContactSupport = async () => {
+        setIsContacting(true);
+        try {
+            await startSupportConversation('Balance Top-up Inquiry');
+            setShowBankingModal(false);
+            setSaveSuccess('Support conversation started. Check your messages!');
+            setTimeout(() => setSaveSuccess(''), 3000);
+        } catch (err) {
+            setSaveError(err.message || 'Failed to contact support');
+            console.error('Error contacting support:', err);
+        } finally {
+            setIsContacting(false);
+        }
     };
 
     return (
@@ -156,10 +200,27 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
                     <header className="mb-8 flex flex-col md:flex-row md:items-end justify-between gap-4">
                         <div>
                             <h2 className="text-3xl font-black text-slate-900 dark:text-white tracking-tight">Client Profile & Machines</h2>
+                            {saveSuccess && (
+                                <p className="text-sm text-green-600 dark:text-green-400 mt-2">{saveSuccess}</p>
+                            )}
+                            {saveError && (
+                                <p className="text-sm text-red-600 dark:text-red-400 mt-2">{saveError}</p>
+                            )}
                         </div>
                         <div className="flex gap-3">
-                            <button className="px-5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 font-semibold text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-all">
+                            <button 
+                                onClick={() => window.location.reload()}
+                                className="px-5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 font-semibold text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-all"
+                            >
                                 Discard
+                            </button>
+                            <button 
+                                onClick={handleSaveProfile}
+                                disabled={isSaving}
+                                className="px-5 py-2.5 rounded-lg bg-primary hover:bg-orange-600 text-white font-semibold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <span className="material-symbols-outlined text-lg">{isSaving ? 'hourglass_bottom' : 'save'}</span>
+                                {isSaving ? 'Saving...' : 'Save Changes'}
                             </button>
                         </div>
                     </header>
@@ -170,18 +231,6 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
                             {/* Profile Card */}
                             <div className="bg-white dark:bg-surface-dark rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 p-6">
                                 <div className="flex flex-col items-center text-center">
-                                    <div className="relative group">
-                                        <div className="w-28 h-28 rounded-2xl overflow-hidden border-4 border-primary/20 mb-4 bg-slate-200 dark:bg-slate-700">
-                                            <img
-                                                className="w-full h-full object-cover"
-                                                alt="Client profile avatar"
-                                                src="https://lh3.googleusercontent.com/aida-public/AB6AXuC5nNk_23zL3CyC_Cy6lADIFNiMXncrGTOQPG8DNdClHPglGqo1aB9s1Qb1sYrDLkyevKvDPurQy-KHODzKPnfTVyk52P8B73r_EEOdjGendzHKlnkaAEp0_dKFPJeEGfU3iYLku314lh95F1pS4Y5Pqe7pqMSkq4eSG5ZevGx4rKvxqfpUbX-pPw_601xWioIbyBUN6uTxdR727X9ImrNThtsgrMZOfGmsuxa4yMi_uohVml8Idy4bcx5oSlmwaJtbTHYKi2Rdn1s"
-                                            />
-                                        </div>
-                                        <button className="absolute bottom-2 -right-2 w-9 h-9 bg-primary text-white rounded-lg flex items-center justify-center shadow-lg border-2 border-white dark:border-surface-dark hover:scale-110 transition-transform">
-                                            <span className="material-symbols-outlined text-sm">photo_camera</span>
-                                        </button>
-                                    </div>
                                     <h3 className="text-xl font-bold text-slate-900 dark:text-white">{profileData.businessName}</h3>
                                     <p className="text-slate-500 font-medium text-sm mb-4">Client ID: #CLI-90210</p>
                                     <div className="w-full pt-4 border-t border-slate-100 dark:border-slate-700 flex flex-col gap-2">
@@ -206,7 +255,7 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
                                     </div>
                                     <span className="material-symbols-outlined text-white/40 text-3xl">account_balance_wallet</span>
                                 </div>
-                                <button className="w-full py-3 bg-white text-primary rounded-lg font-bold text-sm hover:bg-slate-50 transition-colors flex items-center justify-center gap-2">
+                                <button onClick={() => setShowBankingModal(true)} className="w-full py-3 bg-white text-primary rounded-lg font-bold text-sm hover:bg-slate-50 transition-colors flex items-center justify-center gap-2">
                                     <span className="material-symbols-outlined text-lg">add_circle</span>
                                     Add Balance
                                 </button>
@@ -430,24 +479,70 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
                                 </div>
                             </div>
 
-                            {/* 2FA Banner */}
-                            <div className="bg-blue-50 dark:bg-blue-900/10 rounded-xl border border-blue-200 dark:border-blue-900/50 p-6 flex flex-col md:flex-row items-center justify-between gap-4">
-                                <div className="flex gap-4 items-center">
-                                    <div className="w-12 h-12 bg-blue-100 dark:bg-blue-900/30 text-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
-                                        <span className="material-symbols-outlined">info</span>
-                                    </div>
-                                    <div>
-                                        <h4 className="text-blue-900 dark:text-blue-400 font-bold">Two-Factor Authentication</h4>
-                                        <p className="text-sm text-blue-700/70 dark:text-blue-400/60">Enhance your account security by enabling 2FA for all login attempts.</p>
-                                    </div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Banking Provider Modal */}
+                {showBankingModal && (
+                    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                        <div className="bg-white dark:bg-surface-dark rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 max-w-md w-full">
+                            {/* Header */}
+                            <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center gap-4">
+                                <div className="w-12 h-12 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center text-amber-600">
+                                    <span className="material-symbols-outlined text-xl">schedule</span>
                                 </div>
-                                <button className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold transition-colors whitespace-nowrap">
-                                    Enable 2FA
+                                <div className="flex-1">
+                                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">Banking Integration</h3>
+                                    <p className="text-xs text-slate-500">Connecting financial provider</p>
+                                </div>
+                                <button
+                                    onClick={() => setShowBankingModal(false)}
+                                    className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                                >
+                                    <span className="material-symbols-outlined">close</span>
+                                </button>
+                            </div>
+
+                            {/* Content */}
+                            <div className="p-8 text-center space-y-4">
+                                <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-amber-50 dark:bg-amber-900/10 mx-auto">
+                                    <span className="material-symbols-outlined text-3xl text-amber-500 animate-pulse">hourglass_top</span>
+                                </div>
+                                <div>
+                                    <h4 className="text-lg font-bold text-slate-900 dark:text-white mb-2">Waiting to Connect</h4>
+                                    <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+                                        Our platform is currently connecting to banking and financial providers to enable secure top-ups.
+                                    </p>
+                                </div>
+                                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 text-left">
+                                    <p className="text-sm text-blue-900 dark:text-blue-200 font-medium flex items-start gap-2">
+                                        <span className="material-symbols-outlined text-lg flex-shrink-0 mt-0.5">info</span>
+                                        <span>In the meantime, please contact our support team to top up your balance manually.</span>
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* Footer */}
+                            <div className="p-6 border-t border-slate-200 dark:border-slate-800 flex gap-3">
+                                <button
+                                    onClick={() => setShowBankingModal(false)}
+                                    className="flex-1 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-900 dark:text-white font-semibold text-sm rounded-lg transition-colors"
+                                >
+                                    Close
+                                </button>
+                                <button 
+                                    onClick={handleContactSupport}
+                                    disabled={isContacting}
+                                    className="flex-1 py-2.5 bg-primary hover:bg-orange-600 text-white font-semibold text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                >
+                                    <span className="material-symbols-outlined text-lg">{isContacting ? 'hourglass_bottom' : 'mail'}</span>
+                                    {isContacting ? 'Contacting...' : 'Contact Support'}
                                 </button>
                             </div>
                         </div>
                     </div>
-                </div>
+                )}
             </main>
         </div>
     );

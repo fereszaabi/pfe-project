@@ -12,6 +12,7 @@ use App\Models\Employee;
 use App\Events\TicketUpdated;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use App\Services\LocalOtpCodeStore;
 use Laravel\Sanctum\PersonalAccessToken;
 
 class ClientController extends Controller
@@ -108,7 +109,7 @@ class ClientController extends Controller
                 'client_rating',
                 'rating_comment',
                 'created_at',
-                'updated_at',
+                'created_at as updated_at',
                 'assigned_at',
                 'id_employee',
                 'image',
@@ -274,6 +275,43 @@ class ClientController extends Controller
     /**
      * Store a newly created resource in storage.
      */
+    public function sendTicketOtp(Request $request)
+    {
+        $user = $request->user();
+        $client = $this->resolveClient($user);
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
+
+        $otp = rand(100000, 999999);
+        $cacheKey = 'ticket_otp:' . $client->id . ':' . $user->id;
+
+        try {
+            app(LocalOtpCodeStore::class)->record('ticket', $client->mail, $otp, [
+                'client_id' => $client->id,
+                'user_id' => $user->id,
+                'cache_key' => $cacheKey,
+            ]);
+
+            \Illuminate\Support\Facades\Mail::to($client->mail)->send(new \App\Mail\OtpMail($otp, $client->nom));
+            Cache::put($cacheKey, $otp, now()->addMinutes(10));
+
+            return response()->json([
+                'message' => 'Verification code sent to your email. Please enter it to continue.',
+            ]);
+        } catch (\Throwable $e) {
+            \Log::error('Ticket OTP send failed', [
+                'client_id' => $client->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'Unable to send verification code. Please check your email configuration.',
+            ], 502);
+        }
+    }
+
     public function store(Request $request)
     {
         $user = $request->user();
@@ -291,6 +329,26 @@ class ClientController extends Controller
             \Log::debug('store: Client not found after resolution');
             return response()->json(['error' => 'Client not found'], 404);
         }
+
+        // Verify OTP before creating ticket
+        $otp = $request->input('otp_code');
+        if (!$otp) {
+            return response()->json([
+                'error' => 'Verification code required',
+                'verification_required' => true,
+            ], 422);
+        }
+
+        $cacheKey = 'ticket_otp:' . $client->id . ':' . $user->id;
+        $cachedOtp = Cache::get($cacheKey);
+
+        if (!$cachedOtp || (string) $cachedOtp !== (string) $otp) {
+            return response()->json([
+                'error' => 'Invalid or expired verification code.',
+            ], 422);
+        }
+
+        Cache::forget($cacheKey);
 
         \Log::debug('store: Client resolved', [
             'client_id' => $client->id,

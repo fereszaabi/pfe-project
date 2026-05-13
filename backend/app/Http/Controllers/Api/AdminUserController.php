@@ -14,6 +14,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Cache;
+use App\Services\LocalOtpCodeStore;
 
 class AdminUserController extends Controller
 {
@@ -247,6 +248,7 @@ class AdminUserController extends Controller
 
     /**
      * Update client balance (add or subtract)
+     * When setting to positive, automatically deduct any outstanding debt
      */
     public function updateBalance(Request $request, Client $client)
     {
@@ -257,13 +259,21 @@ class AdminUserController extends Controller
 
         $operation = $validated['operation'];
         $amount = abs($validated['amount']);
+        $previousBalance = (float) $client->money;
 
         if ($operation === 'add') {
             $client->increment('money', $amount);
         } elseif ($operation === 'subtract') {
             $client->decrement('money', $amount);
         } elseif ($operation === 'set') {
-            $client->update(['money' => $amount]);
+            // If setting to a positive amount, deduct any outstanding debt first
+            if ($amount > 0 && $previousBalance < 0) {
+                $debt = abs($previousBalance); // Get the absolute debt amount
+                $balanceAfterDebt = $amount - $debt;
+                $client->update(['money' => $balanceAfterDebt]);
+            } else {
+                $client->update(['money' => $amount]);
+            }
         }
 
         return response()->json([
@@ -291,6 +301,16 @@ class AdminUserController extends Controller
         $employees = Employee::orderBy('created_at', 'desc')->get();
         
         return response()->json(['employees' => $employees]);
+    }
+
+    public function getLocalOtpCodes(Request $request)
+    {
+        $limit = (int) $request->integer('limit', 20);
+
+        return response()->json([
+            'ok' => true,
+            'codes' => app(LocalOtpCodeStore::class)->latest($limit),
+        ]);
     }
 
     /**
@@ -726,4 +746,206 @@ class AdminUserController extends Controller
         ]);
     }
     
+    /**
+     * Block a ticket and mark all client's tickets as blocked. Also mark client state as blocked.
+     */
+    public function blockTicket(Request $request, $ticketId)
+    {
+        $ticket = Demande::find($ticketId);
+        if (!$ticket) {
+            return response()->json(['error' => 'Ticket not found'], 404);
+        }
+
+        DB::transaction(function () use ($ticket) {
+            $clientId = $ticket->id_client;
+            Demande::where('id_client', $clientId)->update(['blocked' => true]);
+            Client::where('id', $clientId)->update(['client_state' => 'blocked']);
+
+            // Broadcast updates for all affected tickets so frontends refresh
+            $affected = Demande::where('id_client', $clientId)->get();
+            foreach ($affected as $t) {
+                broadcast(new TicketUpdated($t->fresh()->load(['client', 'employee', 'machine'])))->toOthers();
+            }
+        });
+
+        return response()->json(['ok' => true, 'message' => 'Client tickets blocked']);
+    }
+
+    /**
+     * Unblock a ticket. If no other blocked tickets remain for client, restore client_state to active.
+     */
+    public function unblockTicket(Request $request, $ticketId)
+    {
+        $ticket = Demande::find($ticketId);
+        if (!$ticket) {
+            return response()->json(['error' => 'Ticket not found'], 404);
+        }
+
+        DB::transaction(function () use ($ticket) {
+            $clientId = $ticket->id_client;
+            Demande::where('id', $ticket->id)->update(['blocked' => false]);
+
+            // If no other blocked tickets remain for the client, set client_state back to active
+            $remaining = Demande::where('id_client', $clientId)->where('blocked', true)->count();
+            if ($remaining === 0) {
+                Client::where('id', $clientId)->update(['client_state' => 'active']);
+            }
+
+            // Broadcast update for the unblocked ticket
+            $updated = Demande::find($ticket->id);
+            broadcast(new TicketUpdated($updated->fresh()->load(['client', 'employee', 'machine'])))->toOthers();
+        });
+
+        return response()->json(['ok' => true, 'message' => 'Ticket unblocked']);
+    }
+
+    /**
+     * Notify an employee that a ticket has been assigned to them
+     */
+    public function notifyEmployeeAssignment(Request $request)
+    {
+        $validated = $request->validate([
+            'employee_id' => 'required|integer|exists:employees,id',
+            'ticket_id' => 'required|integer|exists:demandes,id',
+            'ticket_title' => 'required|string|max:255',
+        ]);
+
+        $employee = Employee::find($validated['employee_id']);
+        $ticket = Demande::with(['client'])->find($validated['ticket_id']);
+
+        if (!$employee || !$ticket) {
+            return response()->json(['error' => 'Employee or ticket not found'], 404);
+        }
+
+        $clientName = $ticket->client?->nom ?? 'Unknown Client';
+        $message = "New ticket assigned: {$validated['ticket_title']} from {$clientName}";
+
+        // Create a notification/message for the employee
+        try {
+            // Send a system message to the employee
+            \App\Models\Message::create([
+                'id_sender' => null, // System message
+                'sender_type' => 'system',
+                'id_receiver' => $employee->id,
+                'receiver_type' => 'employee',
+                'ticket_id' => $ticket->id,
+                'message' => $message,
+                'message_type' => 'notification',
+            ]);
+
+            return response()->json([
+                'ok' => true,
+                'message' => 'Employee notified of ticket assignment',
+            ]);
+        } catch (\Exception $e) {
+            // Log the error but don't fail the assignment
+            \Log::warning('Failed to notify employee of assignment: ' . $e->getMessage());
+            return response()->json([
+                'ok' => true,
+                'message' => 'Assignment completed (notification failed)',
+            ]);
+        }
+    }
+
+    /**
+     * Notify an employee that a ticket has been reassigned to them
+     */
+    public function notifyEmployeeReassignment(Request $request)
+    {
+        $validated = $request->validate([
+            'employee_id' => 'required|integer|exists:employees,id',
+            'ticket_id' => 'required|integer|exists:demandes,id',
+            'ticket_title' => 'required|string|max:255',
+            'previous_employee_id' => 'nullable|integer|exists:employees,id',
+        ]);
+
+        $employee = Employee::find($validated['employee_id']);
+        $ticket = Demande::with(['client'])->find($validated['ticket_id']);
+        $previousEmployee = $validated['previous_employee_id'] 
+            ? Employee::find($validated['previous_employee_id']) 
+            : null;
+
+        if (!$employee || !$ticket) {
+            return response()->json(['error' => 'Employee or ticket not found'], 404);
+        }
+
+        $clientName = $ticket->client?->nom ?? 'Unknown Client';
+        $previousName = $previousEmployee ? "from {$previousEmployee->nom}" : '';
+        $message = "Ticket reassigned to you: {$validated['ticket_title']} from {$clientName} {$previousName}";
+
+        try {
+            // Send a system message to the new employee
+            \App\Models\Message::create([
+                'id_sender' => null, // System message
+                'sender_type' => 'system',
+                'id_receiver' => $employee->id,
+                'receiver_type' => 'employee',
+                'ticket_id' => $ticket->id,
+                'message' => $message,
+                'message_type' => 'notification',
+            ]);
+
+            // Optionally notify the previous employee that they've been removed
+            if ($previousEmployee) {
+                \App\Models\Message::create([
+                    'id_sender' => null, // System message
+                    'sender_type' => 'system',
+                    'id_receiver' => $previousEmployee->id,
+                    'receiver_type' => 'employee',
+                    'ticket_id' => $ticket->id,
+                    'message' => "Ticket reassigned: {$validated['ticket_title']} has been reassigned from you to {$employee->nom}",
+                    'message_type' => 'notification',
+                ]);
+            }
+
+            return response()->json([
+                'ok' => true,
+                'message' => 'Employee notified of ticket reassignment',
+            ]);
+        } catch (\Exception $e) {
+            // Log the error but don't fail the assignment
+            \Log::warning('Failed to notify employee of reassignment: ' . $e->getMessage());
+            return response()->json([
+                'ok' => true,
+                'message' => 'Reassignment completed (notification failed)',
+            ]);
+        }
+    }
+    
+        /**
+         * Delete a ticket
+         */
+        public function deleteTicket(Request $request, $ticketId)
+        {
+            $ticket = Demande::find($ticketId);
+
+            if (!$ticket) {
+                return response()->json(['error' => 'Ticket not found'], 404);
+            }
+
+            try {
+                DB::transaction(function () use ($ticket) {
+                    // Delete related messages
+                    \App\Models\Message::where('ticket_id', $ticket->id)->delete();
+
+                    // Delete related logs
+                    \App\Models\Log::where('demande_id', $ticket->id)->delete();
+
+                    // Delete the ticket
+                    $ticket->delete();
+
+                    // Broadcast the deletion event
+                    broadcast(new TicketUpdated(null))->toOthers();
+                });
+
+                return response()->json([
+                    'ok' => true,
+                    'message' => 'Ticket deleted successfully',
+                ]);
+            } catch (\Exception $e) {
+                return response()->json([
+                    'error' => 'Failed to delete ticket: ' . $e->getMessage(),
+                ], 500);
+            }
+        }
 }

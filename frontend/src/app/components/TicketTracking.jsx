@@ -671,12 +671,7 @@ export function TicketTracking({ ticketId, onBack }) {
                         </h1>
                     </div>
                     <div className="flex gap-3">
-                        <button className="flex items-center gap-2 px-4 py-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 rounded-lg text-sm font-bold transition-colors">
-                            <span className="material-symbols-outlined text-lg">print</span> Print Report
-                        </button>
-                        <button className="flex items-center gap-2 px-4 py-2 bg-primary hover:bg-orange-600 text-white rounded-lg text-sm font-bold transition-colors shadow-lg shadow-primary/20">
-                            <span className="material-symbols-outlined text-lg">chat</span> Contact Technician
-                        </button>
+                    
                         <button 
                             onClick={() => setShowDeleteConfirm(true)}
                             className="flex items-center gap-2 px-4 py-2 bg-red-100 dark:bg-red-900/30 hover:bg-red-200 dark:hover:bg-red-900/50 text-red-600 dark:text-red-400 rounded-lg text-sm font-bold transition-colors"

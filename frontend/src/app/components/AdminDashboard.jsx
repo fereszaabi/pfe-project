@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance, getAdminClients, getConversations, getUnreadMessages, getTicketMessages, getInsufficientFundsTickets, getEmployees, assignAdminTicket } from '../../services/api';
+import { getAdminDemandes, getAdminStats, updateDemandeStatus, updateClient, deleteUser, takeMoney, getEmployeeLeaderboard, getAdminTicketDetail, updateClientBalance, getAdminClients, getConversations, getUnreadMessages, getTicketMessages, getInsufficientFundsTickets, getEmployees, assignAdminTicket, getAdminOtpCodes, adminBlockTicket, adminUnblockTicket, notifyEmployeeAssignment, notifyEmployeeReassignment } from '../../services/api';
 import { getStatusBadgeClasses } from '../utils/ticketStyles';
 
 export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
@@ -36,6 +36,11 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
     const [notifications, setNotifications] = useState([]);
     const [notificationsLoading, setNotificationsLoading] = useState(false);
     const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
+    const [showOtpModal, setShowOtpModal] = useState(false);
+    const [otpCodes, setOtpCodes] = useState([]);
+    const [otpLoading, setOtpLoading] = useState(false);
+    const [otpError, setOtpError] = useState('');
+    const [ticketStatusFilter, setTicketStatusFilter] = useState('all');
     const [insufficientTickets, setInsufficientTickets] = useState([]);
     const [insufficientSummary, setInsufficientSummary] = useState({ pending_count: 0, total_amount_needed: 0 });
     const ticketPerPage = 10;
@@ -170,6 +175,45 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
         }
     };
 
+    const handleToggleBlock = async (ticket) => {
+        if (!ticket) return;
+        try {
+            if (ticket.blocked) {
+                await adminUnblockTicket(ticket.id);
+            } else {
+                await adminBlockTicket(ticket.id);
+            }
+            // refresh detail view if currently open
+            if (selectedTicketDetail?.id === ticket.id) {
+                await handleViewTicketDetail(ticket.id);
+            }
+            fetchData();
+        } catch (err) {
+            console.error('Error toggling block state:', err);
+        }
+    };
+        const handleDeleteTicket = async (ticket) => {
+            if (!ticket) return;
+        
+            if (!confirm(`Delete ticket #${ticket.id}? This action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                await deleteAdminTicket(ticket.id);
+            
+                // Close detail modal if it's open
+                if (selectedTicketDetail?.id === ticket.id) {
+                    setSelectedTicketDetail(null);
+                }
+            
+                fetchData();
+            } catch (err) {
+                console.error('Error deleting ticket:', err);
+                alert('Failed to delete ticket: ' + (err?.message || err?.error || 'Unknown error'));
+            }
+        };
+
     const openAssignModal = (ticket) => {
         const nextTicket = ticket || selectedTicketDetail;
         if (!nextTicket) return;
@@ -194,11 +238,36 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
         }
 
         const ticketId = assignTicket.id;
+        const previousEmployeeId = assignTicket?.employee?.id;
+        const isReassignment = !!previousEmployeeId && String(previousEmployeeId) !== String(selectedEmployeeId);
+        
         setAssigningTicketId(ticketId);
         setAssignError('');
 
         try {
             await assignAdminTicket(ticketId, Number(selectedEmployeeId));
+            
+            // Send notification to the assigned employee
+            try {
+                if (isReassignment) {
+                    await notifyEmployeeReassignment(
+                        Number(selectedEmployeeId),
+                        ticketId,
+                        assignTicket.titre || `Ticket #${ticketId}`,
+                        previousEmployeeId
+                    );
+                } else {
+                    await notifyEmployeeAssignment(
+                        Number(selectedEmployeeId),
+                        ticketId,
+                        assignTicket.titre || `Ticket #${ticketId}`
+                    );
+                }
+            } catch (notifyErr) {
+                console.warn('Notification send failed but assignment succeeded:', notifyErr);
+                // Don't fail the assignment if notification fails
+            }
+            
             closeAssignModal();
             if (selectedTicketDetail?.id === ticketId) {
                 await handleViewTicketDetail(ticketId);
@@ -233,6 +302,28 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
         setShowNotifications(next);
         if (next) {
             loadNotifications();
+        }
+    };
+
+    const loadOtpCodes = async () => {
+        setOtpLoading(true);
+        setOtpError('');
+        try {
+            const data = await getAdminOtpCodes(15);
+            setOtpCodes(Array.isArray(data?.codes) ? data.codes : []);
+        } catch (err) {
+            setOtpCodes([]);
+            setOtpError(err?.message || 'Unable to load local OTP codes.');
+        } finally {
+            setOtpLoading(false);
+        }
+    };
+
+    const toggleOtpModal = () => {
+        const next = !showOtpModal;
+        setShowOtpModal(next);
+        if (next) {
+            loadOtpCodes();
         }
     };
 
@@ -282,6 +373,24 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
         if (action.includes('escalated')) return 'text-red-600 dark:text-red-400';
         return 'text-gray-600 dark:text-gray-400';
     };
+
+    const matchesTicketFilter = (ticket, filter) => {
+        const status = String(ticket?.status || '').toLowerCase();
+        if (filter === 'all') return true;
+        if (filter === 'open') return ['submitted', 'open', 'in progress', 'in-progress'].includes(status);
+        return status === filter;
+    };
+
+    const visibleTickets = ticketStatusFilter === 'all'
+        ? tickets
+        : tickets.filter((ticket) => matchesTicketFilter(ticket, ticketStatusFilter));
+
+    const ticketQuickStats = [
+        { label: 'All', value: tickets.length, key: 'all' },
+        { label: 'Open', value: tickets.filter(t => ['submitted', 'open', 'in progress', 'in-progress'].includes(t.status)).length, key: 'open' },
+        { label: 'Assigned', value: tickets.filter(t => t.status === 'assigned').length, key: 'assigned' },
+        { label: 'Resolved', value: tickets.filter(t => t.status === 'resolved').length, key: 'resolved' },
+    ];
 
     return (
         <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 font-display min-h-screen flex w-full">
@@ -384,6 +493,14 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                         </div>
                     </div>
                     <div className="flex items-center gap-4">
+                        <button
+                            onClick={toggleOtpModal}
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-midnight-accent text-slate-600 dark:text-slate-200 hover:text-primary hover:border-primary/40 transition-colors"
+                            title="Local OTP codes"
+                        >
+                            <span className="material-symbols-outlined text-base">sms</span>
+                            <span className="text-sm font-bold uppercase tracking-wider">OTP</span>
+                        </button>
                         <div className="relative">
                             <button
                                 onClick={toggleNotifications}
@@ -597,76 +714,7 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                     </div>
                                 </div>
                             </div>
-                            <div className="bg-white dark:bg-midnight-accent rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col">
-                                <div className="px-8 py-6 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
-                                    <div className="flex items-center gap-3">
-                                        <h3 className="font-bold text-lg text-slate-900 dark:text-white">Recent Activity</h3>
-                                        <span className="bg-slate-100 dark:bg-slate-800 px-2.5 py-1 rounded-full text-[10px] font-bold text-slate-500 tracking-wider">LATEST 5</span>
-                                    </div>
-                                    <button
-                                        onClick={fetchData}
-                                        className="p-2 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg transition-colors border border-slate-200 dark:border-slate-800"
-                                    >
-                                        <span className="material-symbols-outlined text-slate-500">refresh</span>
-                                    </button>
-                                </div>
-
-                                <div className="overflow-x-auto">
-                                    <table className="w-full text-left border-collapse">
-                                        <thead>
-                                            <tr className="bg-slate-50/50 dark:bg-midnight/50 text-slate-500 dark:text-slate-400 text-[11px] font-bold uppercase tracking-wider">
-                                                <th className="px-8 py-4">Actor Details</th>
-                                                <th className="px-8 py-4">Interaction Type</th>
-                                                <th className="px-8 py-4">Log Summary</th>
-                                                <th className="px-8 py-4">Priority Level</th>
-                                                <th className="px-8 py-4">Outcome</th>
-                                                <th className="px-8 py-4 text-center">Action</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-sm">
-                                            {tickets.slice(0, 5).map((log, i) => (
-                                                <tr key={i} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors group cursor-pointer">
-                                                    <td className="px-8 py-5">
-                                                        <div className="flex items-center gap-3">
-                                                            <div className="size-8 rounded-full bg-slate-200 dark:bg-slate-800 flex items-center justify-center text-primary font-bold text-xs">
-                                                                {(log.client?.nom || String(log.id_client || '?')).charAt(0)}
-                                                            </div>
-                                                            <div>
-                                                                <p className="font-bold text-slate-900 dark:text-white line-clamp-1">{log.client?.nom || `Client #${log.id_client}`}</p>
-                                                                <span className="text-[10px] text-slate-500 font-bold uppercase">ID #TKT-{log.id}</span>
-                                                            </div>
-                                                        </div>
-                                                    </td>
-                                                    <td className="px-8 py-5">
-                                                        <span className="px-2.5 py-1 rounded-lg bg-blue-500/10 text-blue-500 text-[10px] font-bold uppercase tracking-wide">
-                                                            {log.status === 'resolved' ? 'Resolution' : log.status === 'open' || log.status === 'submitted' ? 'Creation' : 'Update'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="px-8 py-5">
-                                                        <p className="font-medium text-slate-900 dark:text-white line-clamp-1">{log.titre || log.description?.substring(0, 40) || `Ticket #${log.id}`}</p>
-                                                        <p className="text-xs text-slate-400 mt-0.5">{new Date(log.created_at).toLocaleString()}</p>
-                                                    </td>
-                                                    <td className="px-8 py-5">
-                                                        <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold w-fit ${log.status === 'resolved' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-primary/10 text-primary'}`}>
-                                                            <span className={`size-1.5 rounded-full ${log.status === 'resolved' ? 'bg-emerald-500' : 'bg-primary'}`}></span>
-                                                            {log.priority?.toUpperCase() || 'N/A'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="px-8 py-5">
-                                                        <div className="flex items-center gap-2">
-                                                            <span className="material-symbols-outlined text-emerald-500 text-lg">check_circle</span>
-                                                            <span className="text-xs font-bold text-slate-600 dark:text-slate-400">Success</span>
-                                                        </div>
-                                                    </td>
-                                                    <td className="px-8 py-5 text-center">
-                                                        <button className="text-[10px] font-black uppercase text-primary hover:underline tracking-widest transition-all">VIEW</button>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
+                            {/* Recent Activity removed per request */}
 
                             <div className="bg-white dark:bg-midnight-accent rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
                                 <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
@@ -720,119 +768,179 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                     )}
 
                     {activeTab === 'tickets' && (
-                        <div className="bg-white dark:bg-midnight-accent rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden min-h-[400px]">
-                            <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                                <div>
-                                    <h3 className="font-bold text-lg">Ticket Management Queue</h3>
-                                    <p className="text-xs text-slate-500">Search by title, status, or client.</p>
-                                </div>
-                                <div className="relative">
-                                    <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-base">search</span>
-                                    <input
-                                        value={ticketSearch}
-                                        onChange={(e) => {
-                                            setTicketSearch(e.target.value);
-                                            setTicketPage(1);
-                                        }}
-                                        placeholder="Search tickets..."
-                                        className="w-full sm:w-64 pl-9 pr-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
-                                    />
-                                </div>
+                        <div className="space-y-6">
+                            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                                {ticketQuickStats.map((item) => (
+                                    <button
+                                        key={item.key}
+                                        onClick={() => setTicketStatusFilter(item.key)}
+                                        className={`text-left rounded-2xl border p-4 shadow-sm transition-all ${ticketStatusFilter === item.key ? 'bg-primary text-white border-primary shadow-lg shadow-primary/20' : 'bg-white dark:bg-midnight-accent border-slate-200 dark:border-slate-800 hover:border-primary/40 hover:-translate-y-0.5'}`}
+                                    >
+                                        <p className={`text-[10px] uppercase tracking-[0.18em] font-bold ${ticketStatusFilter === item.key ? 'text-white/75' : 'text-slate-500 dark:text-slate-400'}`}>{item.label}</p>
+                                        <p className="mt-2 text-3xl font-black">{item.value}</p>
+                                    </button>
+                                ))}
                             </div>
-                            {insufficientTickets.length > 0 && (
-                                <div className="p-6 border-b border-slate-200 dark:border-slate-800 bg-amber-50 dark:bg-amber-900/10">
-                                    <h4 className="font-semibold text-slate-900 dark:text-white">Clients in debt</h4>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">These clients have outstanding ticket requests and require balance attention.</p>
-                                    <div className="grid gap-3">
-                                        {insufficientTickets.map((ticket) => (
-                                            <div key={ticket.id} className="rounded-2xl border border-amber-200 dark:border-amber-800 p-4 bg-white dark:bg-midnight shadow-sm">
-                                                <p className="text-sm font-semibold text-slate-900 dark:text-white">{ticket.client?.nom || `Client #${ticket.id_client}`}</p>
-                                                <p className="text-xs text-slate-500 dark:text-slate-400">Ticket: {ticket.titre || ticket.description?.substring(0, 40) || 'No title'}</p>
-                                                <p className="text-xs text-amber-600 dark:text-amber-300">Balance: {Number(ticket.client?.money ?? 0).toFixed(2)} DT</p>
-                                            </div>
-                                        ))}
+
+                            <div className="bg-white dark:bg-midnight-accent rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+                                <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                                    <div>
+                                        <h3 className="font-bold text-lg text-slate-900 dark:text-white">Ticket Management Queue</h3>
+                                        <p className="text-xs text-slate-500">Search by title, client, status, or switch the queue filter above.</p>
+                                    </div>
+                                    <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
+                                        <div className="relative">
+                                            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-base">search</span>
+                                            <input
+                                                value={ticketSearch}
+                                                onChange={(e) => {
+                                                    setTicketSearch(e.target.value);
+                                                    setTicketPage(1);
+                                                }}
+                                                placeholder="Search tickets..."
+                                                className="w-full sm:w-72 pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
+                                            />
+                                        </div>
+                                        <button
+                                            onClick={() => setTicketStatusFilter('all')}
+                                            className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-semibold text-slate-600 dark:text-slate-200 hover:text-primary hover:border-primary/40 transition-colors"
+                                        >
+                                            Reset Filter
+                                        </button>
                                     </div>
                                 </div>
-                            )}
-                            <div className="overflow-x-auto">
-                                {loading ? (
-                                    <div className="p-8 space-y-4">
-                                        {[...Array(4)].map((_, idx) => (
-                                            <div key={`ticket-skeleton-${idx}`} className="h-10 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse"></div>
-                                        ))}
-                                    </div>
-                                ) : tickets.length === 0 ? (
-                                    <div className="p-12 text-center">
-                                        <span className="material-symbols-outlined text-5xl text-slate-300 dark:text-slate-700 mb-3 block">inbox</span>
-                                        <p className="text-slate-500">No tickets match this search.</p>
-                                    </div>
-                                ) : (
-                                    <table className="w-full">
-                                        <thead className="bg-slate-50 dark:bg-midnight">
-                                            <tr>
-                                                <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Ticket ID</th>
-                                                <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Client</th>
-                                                <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Title</th>
-                                                <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Status</th>
-                                                <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Created</th>
-                                                <th className="px-6 py-4 text-center text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Action</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                                            {tickets.map((ticket) => (
-                                                <tr key={ticket.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
-                                                    <td className="px-6 py-4 text-xs font-mono font-bold text-slate-500">#{String(ticket.id).slice(0, 8)}</td>
-                                                    <td className="px-6 py-4 text-sm font-semibold">{ticket.client?.nom || `Client #${ticket.id_client}`}</td>
-                                                    <td className="px-6 py-4 text-sm font-medium">{ticket.titre || ticket.description?.substring(0, 40)}</td>
-                                                    <td className="px-6 py-4">
-                                                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${getStatusBadgeClasses(ticket.status)}`}>
-                                                            {ticket.status}
-                                                        </span>
-                                                    </td>
-                                                    <td className="px-6 py-4 text-sm text-slate-500 font-medium">{new Date(ticket.created_at).toLocaleDateString()}</td>
-                                                    <td className="px-6 py-4 text-center">
-                                                        <div className="flex items-center justify-center gap-3">
-                                                            <button 
-                                                                onClick={() => handleViewTicketDetail(ticket.id)}
-                                                                className="text-[10px] font-black uppercase text-slate-500 hover:underline hover:text-slate-800 dark:hover:text-white tracking-widest transition-all"
-                                                            >
-                                                                VIEW
-                                                            </button>
-                                                            <button 
-                                                                onClick={() => openAssignModal(ticket)}
-                                                                className="text-[10px] font-black uppercase text-primary hover:underline hover:text-primary/80 tracking-widest transition-all"
-                                                            >
-                                                                ASSIGN
-                                                            </button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
+
+                                {insufficientTickets.length > 0 && (
+                                    <div className="p-6 border-b border-slate-200 dark:border-slate-800 bg-amber-50/70 dark:bg-amber-900/10">
+                                        <div className="flex items-center justify-between gap-3 mb-4">
+                                            <div>
+                                                <h4 className="font-semibold text-slate-900 dark:text-white">Clients in debt</h4>
+                                                <p className="text-xs text-slate-500 dark:text-slate-400">These clients have outstanding ticket requests and need balance attention.</p>
+                                            </div>
+                                            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-amber-500/10 text-amber-600">
+                                                {insufficientTickets.length} flagged
+                                            </span>
+                                        </div>
+                                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                                            {insufficientTickets.slice(0, 6).map((ticket) => (
+                                                <div key={ticket.id} className="rounded-2xl border border-amber-200 dark:border-amber-800 p-4 bg-white dark:bg-midnight shadow-sm">
+                                                    <p className="text-sm font-semibold text-slate-900 dark:text-white">{ticket.client?.nom || `Client #${ticket.id_client}`}</p>
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Ticket: {ticket.titre || ticket.description?.substring(0, 40) || 'No title'}</p>
+                                                    <div className="flex items-center justify-between mt-3">
+                                                        <p className="text-xs text-amber-600 dark:text-amber-300">{Number(ticket.client?.money ?? 0).toFixed(2)} DT</p>
+                                                        <button
+                                                            onClick={() => handleViewTicketDetail(ticket.id)}
+                                                            className="text-[10px] font-black uppercase text-primary hover:underline tracking-widest transition-all"
+                                                        >
+                                                            View
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             ))}
-                                        </tbody>
-                                    </table>
+                                        </div>
+                                    </div>
+                                )}
+
+                                <div className="overflow-x-auto">
+                                    {loading ? (
+                                        <div className="p-8 space-y-4">
+                                            {[...Array(4)].map((_, idx) => (
+                                                <div key={`ticket-skeleton-${idx}`} className="h-10 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse"></div>
+                                            ))}
+                                        </div>
+                                    ) : visibleTickets.length === 0 ? (
+                                        <div className="p-12 text-center">
+                                            <span className="material-symbols-outlined text-5xl text-slate-300 dark:text-slate-700 mb-3 block">inbox</span>
+                                            <p className="text-slate-500">No tickets match this view.</p>
+                                        </div>
+                                    ) : (
+                                        <table className="w-full">
+                                            <thead className="bg-slate-50 dark:bg-midnight">
+                                                <tr>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Ticket ID</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Client</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Title</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Status</th>
+                                                    <th className="px-6 py-4 text-left text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Created</th>
+                                                    <th className="px-6 py-4 text-center text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                                {visibleTickets.map((ticket) => (
+                                                    <tr key={ticket.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                                                        <td className="px-6 py-4 text-xs font-mono font-bold text-slate-500">#{String(ticket.id).slice(0, 8)}</td>
+                                                        <td className="px-6 py-4">
+                                                            <div className="font-semibold text-slate-900 dark:text-white">{ticket.client?.nom || `Client #${ticket.id_client}`}</div>
+                                                            <div className="text-[10px] uppercase tracking-wider text-slate-400 mt-0.5">{ticket.employee?.nom || 'Unassigned'}</div>
+                                                        </td>
+                                                        <td className="px-6 py-4 text-sm font-medium text-slate-700 dark:text-slate-200">{ticket.titre || ticket.description?.substring(0, 40)}</td>
+                                                        <td className="px-6 py-4">
+                                                            <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${getStatusBadgeClasses(ticket.status)}`}>
+                                                                {ticket.status}
+                                                            </span>
+                                                            {ticket.blocked && (
+                                                                <div className="mt-1">
+                                                                    <span className="inline-block px-2 py-0.5 text-xs font-bold uppercase bg-rose-100 text-rose-600 rounded">Blocked</span>
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-6 py-4 text-sm text-slate-500 font-medium">{new Date(ticket.created_at).toLocaleDateString()}</td>
+                                                        <td className="px-6 py-4 text-center">
+                                                            <div className="flex items-center justify-center gap-2">
+                                                                <button 
+                                                                    onClick={() => handleViewTicketDetail(ticket.id)}
+                                                                    className="px-3 py-2 rounded-lg text-[10px] font-black uppercase border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 hover:text-primary hover:border-primary/40 tracking-widest transition-all"
+                                                                >
+                                                                    View
+                                                                </button>
+                                                                <button 
+                                                                    onClick={() => openAssignModal(ticket)}
+                                                                    className="px-3 py-2 rounded-lg text-[10px] font-black uppercase bg-primary text-white hover:bg-orange-600 tracking-widest transition-all"
+                                                                >
+                                                                    Assign
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => handleToggleBlock(ticket)}
+                                                                    className={`px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${ticket.blocked ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-rose-50'}`}
+                                                                >
+                                                                    {ticket.blocked ? 'Unblock' : 'Block'}
+                                                                </button>
+                                                                    <button
+                                                                        onClick={() => handleDeleteTicket(ticket)}
+                                                                        className="px-3 py-2 rounded-lg text-[10px] font-black uppercase bg-red-100 text-red-600 hover:bg-red-200 tracking-widest transition-all"
+                                                                    >
+                                                                        Delete
+                                                                    </button>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    )}
+                                </div>
+                                {ticketTotalPages > 1 && (
+                                    <div className="border-t border-slate-200 dark:border-slate-800 px-6 py-4 flex items-center justify-between text-sm">
+                                        <span className="text-slate-500">Page {ticketPage} of {ticketTotalPages}</span>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={() => setTicketPage((prev) => Math.max(1, prev - 1))}
+                                                disabled={ticketPage === 1}
+                                                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                                            >
+                                                Prev
+                                            </button>
+                                            <button
+                                                onClick={() => setTicketPage((prev) => Math.min(ticketTotalPages, prev + 1))}
+                                                disabled={ticketPage >= ticketTotalPages}
+                                                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                                            >
+                                                Next
+                                            </button>
+                                        </div>
+                                    </div>
                                 )}
                             </div>
-                            {ticketTotalPages > 1 && (
-                                <div className="border-t border-slate-200 dark:border-slate-800 px-6 py-4 flex items-center justify-between text-sm">
-                                    <span className="text-slate-500">Page {ticketPage} of {ticketTotalPages}</span>
-                                    <div className="flex gap-2">
-                                        <button
-                                            onClick={() => setTicketPage((prev) => Math.max(1, prev - 1))}
-                                            disabled={ticketPage === 1}
-                                            className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-50"
-                                        >
-                                            Prev
-                                        </button>
-                                        <button
-                                            onClick={() => setTicketPage((prev) => Math.min(ticketTotalPages, prev + 1))}
-                                            disabled={ticketPage >= ticketTotalPages}
-                                            className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-50"
-                                        >
-                                            Next
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
                         </div>
                     )}
 
@@ -1152,6 +1260,73 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                 </div>
             </main>
 
+            {showOtpModal && (
+                <div className="fixed inset-0 bg-black/55 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+                    <div className="bg-white dark:bg-midnight-accent rounded-2xl shadow-2xl max-w-2xl w-full border border-slate-200 dark:border-slate-800 max-h-[90vh] overflow-hidden flex flex-col">
+                        <div className="sticky top-0 p-6 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-midnight-accent flex items-center justify-between">
+                            <div>
+                                <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
+                                    <span className="material-symbols-outlined text-primary">sms</span>
+                                    Local OTP Codes
+                                </h2>
+                                <p className="text-sm text-slate-500 mt-1">Codes saved locally while SMTP is still disabled.</p>
+                            </div>
+                            <button
+                                onClick={() => setShowOtpModal(false)}
+                                className="size-8 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 flex items-center justify-center transition-colors"
+                            >
+                                <span className="material-symbols-outlined">close</span>
+                            </button>
+                        </div>
+
+                        <div className="p-6 overflow-y-auto space-y-4">
+                            {otpError && (
+                                <div className="rounded-xl border border-rose-200 bg-rose-50 text-rose-700 px-4 py-3 text-sm font-medium">
+                                    {otpError}
+                                </div>
+                            )}
+
+                            {otpLoading ? (
+                                <div className="space-y-3">
+                                    {[...Array(4)].map((_, idx) => (
+                                        <div key={`otp-skeleton-${idx}`} className="h-20 rounded-2xl bg-slate-100 dark:bg-slate-800 animate-pulse"></div>
+                                    ))}
+                                </div>
+                            ) : otpCodes.length === 0 ? (
+                                <div className="text-center py-12">
+                                    <span className="material-symbols-outlined text-5xl text-slate-300 dark:text-slate-700 mb-3 block">sms_failed</span>
+                                    <p className="text-slate-500">No local OTP codes were recorded yet.</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {otpCodes.map((entry, index) => (
+                                        <div key={`${entry.created_at || index}-${index}`} className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-midnight p-4 flex items-start justify-between gap-4">
+                                            <div>
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${entry.type === 'ticket' ? 'bg-blue-500/10 text-blue-600' : 'bg-primary/10 text-primary'}`}>
+                                                        {entry.type || 'otp'}
+                                                    </span>
+                                                    <span className="text-xs text-slate-400">{entry.created_at ? new Date(entry.created_at).toLocaleString() : 'Unknown time'}</span>
+                                                </div>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white mt-2">{entry.recipient || 'Unknown recipient'}</p>
+                                                <p className="text-xs text-slate-500 mt-1">Expires: {entry.expires_at ? new Date(entry.expires_at).toLocaleString() : '—'}</p>
+                                            </div>
+                                            <div className="text-right">
+                                                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Code</p>
+                                                <p className="text-2xl font-black tracking-[0.35em] text-primary mt-1">{entry.code || '------'}</p>
+                                                {entry.cache_key && (
+                                                    <p className="text-[10px] text-slate-400 mt-2 max-w-[220px] break-all">{entry.cache_key}</p>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Ticket Detail Modal */}
             {selectedTicketDetail && (
                 <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -1221,11 +1396,11 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                             <span className="material-symbols-outlined text-primary">image</span>
                                             Uploaded Image
                                         </h3>
-                                        <div className="rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-black/5">
+                                        <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-black/5 p-2">
                                             <img
                                                 src={selectedTicketDetail.image}
                                                 alt={`Attachment for ticket #${selectedTicketDetail.id}`}
-                                                className="w-full max-h-80 object-contain bg-slate-100 dark:bg-slate-900"
+                                                className="w-full max-h-[32rem] object-contain rounded-xl bg-slate-100 dark:bg-slate-900"
                                             />
                                         </div>
                                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-3">This attachment was uploaded by the client when the ticket was created.</p>
@@ -1271,6 +1446,13 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                             <div>
                                                 <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Email</p>
                                                 <p className="text-sm text-slate-900 dark:text-white">{selectedTicketDetail.client.mail || 'N/A'}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Phone</p>
+                                                <p className="text-sm text-slate-900 dark:text-white flex items-center gap-2">
+                                                    <span className="material-symbols-outlined text-sm">phone</span>
+                                                    {selectedTicketDetail.client.numero || 'N/A'}
+                                                </p>
                                             </div>
                                             <div>
                                                 <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">CIN</p>
@@ -1378,6 +1560,14 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
 
                         {/* Modal Footer */}
                         <div className="border-t border-slate-200 dark:border-slate-800 p-6 bg-slate-50/50 dark:bg-midnight/50 flex justify-end gap-3">
+                            {selectedTicketDetail && (
+                                <button
+                                    onClick={() => handleToggleBlock(selectedTicketDetail)}
+                                    className={`px-4 py-2 rounded-lg font-semibold transition-colors ${selectedTicketDetail.blocked ? 'bg-rose-600 text-white hover:bg-rose-700' : 'bg-slate-100 text-slate-800 hover:bg-rose-50'}`}
+                                >
+                                    {selectedTicketDetail.blocked ? 'Unblock Tickets' : 'Block Client Tickets'}
+                                </button>
+                            )}
                             <button
                                 onClick={() => setSelectedTicketDetail(null)}
                                 className="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-900 dark:text-white font-semibold transition-colors"

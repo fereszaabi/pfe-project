@@ -403,6 +403,60 @@ class MessagingController extends Controller
     /**
      * Start or get conversation with a specific user (employee, admin, or client)
      */
+    public function startSupportConversation(Request $request)
+    {
+        $request->validate([
+            'subject' => 'nullable|string|max:255',
+        ]);
+
+        $currentUser = $request->user();
+        $currentActor = $this->resolveActorFromUser($currentUser);
+        $currentUserRole = $currentUser->role ?? $currentActor['role'];
+
+        if ($currentUserRole !== 'client') {
+            return response()->json(['message' => 'Only clients can start support conversations from this endpoint'], 403);
+        }
+
+        $supportTarget = User::where('role', 'admin')->orderBy('id')->first();
+
+        if (!$supportTarget) {
+            return response()->json(['message' => 'No support admin available'], 404);
+        }
+
+        $conversation = Conversation::findOrCreateBetweenWithTypes(
+            $currentActor['id'],
+            $currentActor['type'],
+            $supportTarget->id,
+            'user'
+        );
+
+        Message::where('conversation_id', $conversation->id)
+            ->where('recipient_id', $currentActor['id'])
+            ->where('recipient_type', $currentActor['type'])
+            ->where('is_read', false)
+            ->update([
+                'is_read' => true,
+                'read_at' => Carbon::now(),
+            ]);
+
+        $messages = Message::where('conversation_id', $conversation->id)
+            ->orderBy('created_at', 'asc')
+            ->limit(50)
+            ->get();
+
+        return response()->json([
+            'conversation_id' => $conversation->id,
+            'other_participant' => $this->formatParticipant($supportTarget, 'user'),
+            'messages' => $messages->map(function ($msg) {
+                return $msg->formatForResponse();
+            }),
+            'subject' => $request->input('subject'),
+        ]);
+    }
+
+    /**
+     * Start or get conversation with a specific user (employee, admin, or client)
+     */
     public function startConversation(Request $request, $userId)
     {
         $currentUser = $request->user();

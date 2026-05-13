@@ -176,52 +176,6 @@ class AuthController extends Controller
             ]);
         }
 
-        $otp = (string) random_int(100000, 999999);
-        Cache::put('login_otp:' . $user->id, $otp, now()->addMinutes(10));
-        $loginToken = Str::random(40);
-        Cache::put('login_token:' . $loginToken, $user->id, now()->addMinutes(10));
-
-        Mail::to($user->email)->send(new OtpMail($otp, $user->name));
-
-        return response()->json([
-            'message' => 'Verification required',
-            'two_factor_required' => true,
-            'login_token' => $loginToken,
-        ], 202);
-    }
-
-    public function verifyOtp(Request $request)
-    {
-        $request->validate([
-            'login_token' => 'required|string',
-            'otp' => 'required|digits:6',
-        ]);
-
-        $userId = Cache::get('login_token:' . $request->login_token);
-        if (!$userId) {
-            throw ValidationException::withMessages([
-                'otp' => ['Verification session expired. Please log in again.'],
-            ]);
-        }
-
-        $expected = Cache::get('login_otp:' . $userId);
-        if (!$expected || (string) $expected !== (string) $request->otp) {
-            throw ValidationException::withMessages([
-                'otp' => ['Invalid verification code.'],
-            ]);
-        }
-
-        Cache::forget('login_otp:' . $userId);
-        Cache::forget('login_token:' . $request->login_token);
-
-        $user = User::find($userId);
-        if (!$user) {
-            throw ValidationException::withMessages([
-                'otp' => ['User not found.'],
-            ]);
-        }
-
-        $role = $user->role;
         $token = $user->createToken($role . '-token')->plainTextToken;
 
         return response()->json([
@@ -230,6 +184,13 @@ class AuthController extends Controller
             'user' => $user,
             'token' => $token,
         ]);
+    }
+
+    public function verifyOtp(Request $request)
+    {
+        return response()->json([
+            'message' => 'Two-factor login has been disabled.',
+        ], 410);
     }
 
     public function logout(Request $request)
