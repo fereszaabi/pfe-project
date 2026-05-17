@@ -29,9 +29,17 @@ class TicketUpdated implements ShouldBroadcast
             new PrivateChannel('ticket.' . $this->ticket->id),
         ];
 
+        if ($this->ticket->id_client) {
+            $channels[] = new PrivateChannel('user.client.' . $this->ticket->id_client);
+        }
+
         $clientUserId = $this->resolveUserIdForClient($this->ticket->id_client);
         if ($clientUserId) {
             $channels[] = new PrivateChannel('user.user.' . $clientUserId);
+        }
+
+        if ($this->ticket->id_employee) {
+            $channels[] = new PrivateChannel('user.employee.' . $this->ticket->id_employee);
         }
 
         $employeeUserId = $this->resolveUserIdForEmployee($this->ticket->id_employee);

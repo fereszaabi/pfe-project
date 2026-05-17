@@ -1,12 +1,15 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Ticket, Users, Clock, CheckCircle, AlertTriangle, LogOut, User, Filter, Search, Send, Star } from 'lucide-react';
 import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmployeeTicket, sendMessage, startConversation, getEmployeeStats, getTicketMessages, getUnreadMessages, getConversations } from '../../services/api';
+import { getEmployeeTickets, assignTicket, claimTicket, unclaimTicket, updateEmployeeTicket, sendMessage, startConversation, getEmployeeStats, getTicketMessages, getUnreadMessages, getConversations, verifyClaimOtp } from '../../services/api';
 import { getEcho } from '../../services/realtime';
 
 export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
-    const BACKEND_BASE_URL = 'http://127.0.0.1:8000';
+    // Derive backend base from Vite env so image URLs work across environments.
+    const BACKEND_BASE_URL = (import.meta.env.VITE_API_ROOT || 'http://127.0.0.1:8000').replace(/\/$/, '');
     const [selectedTicket, setSelectedTicket] = useState(null);
+    const [ticketImageError, setTicketImageError] = useState(false);
+    const [isImagePreviewOpen, setIsImagePreviewOpen] = useState(false);
     const [filterStatus, setFilterStatus] = useState('all');
     const [searchQuery, setSearchQuery] = useState('');
     const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
@@ -31,6 +34,12 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
     const [notificationsLoading, setNotificationsLoading] = useState(false);
     const [toast, setToast] = useState(null);
     const [actionLoading, setActionLoading] = useState({});
+    const [showClaimOtpModal, setShowClaimOtpModal] = useState(false);
+    const [claimOtpCode, setClaimOtpCode] = useState('');
+    const [claimOtpId, setClaimOtpId] = useState(null);
+    const [claimOtpTicketId, setClaimOtpTicketId] = useState(null);
+    const [claimOtpError, setClaimOtpError] = useState('');
+    const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
     const messagesEndRef = useRef(null);
     const isFetchingMessagesRef = useRef(false);
 
@@ -43,17 +52,30 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
             return '';
         }
 
-        if (/^https?:\/\//i.test(imagePath) || imagePath.startsWith('data:') || imagePath.startsWith('blob:')) {
-            return imagePath;
+        const normalizedInput = imagePath.trim().replace(/\\/g, '/');
+
+        if (/^https?:\/\//i.test(normalizedInput) || normalizedInput.startsWith('data:') || normalizedInput.startsWith('blob:')) {
+            return normalizedInput;
         }
 
-        if (imagePath.startsWith('/')) {
-            return `${BACKEND_BASE_URL}${imagePath}`;
+        if (normalizedInput.startsWith('/')) {
+            return `${BACKEND_BASE_URL}${normalizedInput}`;
         }
 
-        const normalizedPath = imagePath.replace(/^storage\//, '');
+        const normalizedPath = normalizedInput
+            .replace(/^\.\//, '')
+            .replace(/^storage\/app\/public\//, '')
+            .replace(/^public\//, '')
+            .replace(/^storage\//, '')
+            .replace(/^\/+/, '');
+
         return `${BACKEND_BASE_URL}/storage/${normalizedPath}`;
     };
+
+    useEffect(() => {
+        setTicketImageError(false);
+        setIsImagePreviewOpen(false);
+    }, [selectedTicket?.id, selectedTicket?.image]);
 
     const showToast = (type, message) => {
         setToast({ type, message, id: Date.now() });
@@ -240,12 +262,29 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                 }
                 return [...prev, incoming];
             });
+
+            if (!isMessageFromCurrentEmployee(incoming)) {
+                showToast('success', 'New message received from client.');
+            }
         });
 
         channel.listen('.ticket.updated', (event) => {
             const updatedTicket = event?.ticket;
             if (!updatedTicket) return;
             if (updatedTicket.id !== selectedTicket.id) return;
+
+            const wasAssigned = Boolean(selectedTicket.id_employee);
+            const nowAssigned = Boolean(updatedTicket.id_employee);
+            const statusChanged = updatedTicket.status && selectedTicket.status && updatedTicket.status !== selectedTicket.status;
+
+            if (!wasAssigned && nowAssigned) {
+                showToast('success', 'This ticket has been claimed. Please continue your work.');
+            } else if (statusChanged) {
+                showToast('success', `Ticket status updated to ${updatedTicket.status}.`);
+            } else {
+                showToast('success', 'Ticket details were updated.');
+            }
+
             setSelectedTicket((prev) => (prev ? { ...prev, ...updatedTicket } : updatedTicket));
         });
 
@@ -299,22 +338,62 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
 
     const handleClaimTicket = async (ticketId) => {
         const actionKey = `claim-${ticketId}`;
-        setActionPending(actionKey, true);
+        setActionLoading((prev) => ({ ...prev, [actionKey]: true }));
         try {
             const response = await claimTicket(ticketId);
-            const ticketData = response?.data || response;
-            if (ticketData && ticketData.id) {
-                setSelectedTicket(ticketData);
-                await fetchTickets({ silent: true });
-                showToast('success', 'Ticket claimed. You can start working now.');
+            
+            // Check if OTP is required
+            if (response?.requires_otp && response?.otp_id) {
+                setClaimOtpId(response.otp_id);
+                setClaimOtpTicketId(ticketId);
+                setClaimOtpCode('');
+                setClaimOtpError('');
+                setShowClaimOtpModal(true);
+                showToast('info', 'OTP has been sent to the admin. Please enter it to confirm ticket acceptance.');
             } else {
-                throw new Error('Invalid response format');
+                // Direct assignment (legacy flow)
+                const ticketData = response?.data || response;
+                if (ticketData && ticketData.id) {
+                    setSelectedTicket(ticketData);
+                    await fetchTickets({ silent: true });
+                    showToast('success', 'Ticket claimed. You can start working now.');
+                }
             }
         } catch (error) {
             console.error('Failed to claim ticket:', error);
-            showToast('error', 'Failed to claim ticket.');
+            showToast('error', error?.message || 'Failed to claim ticket.');
         } finally {
-            setActionPending(actionKey, false);
+            setActionLoading((prev) => ({ ...prev, [actionKey]: false }));
+        }
+    };
+
+    const handleVerifyClaimOtp = async () => {
+        if (!claimOtpCode.trim() || !claimOtpId || !claimOtpTicketId) {
+            setClaimOtpError('Please enter the OTP code');
+            return;
+        }
+
+        setIsVerifyingOtp(true);
+        setClaimOtpError('');
+
+        try {
+            const response = await verifyClaimOtp(claimOtpTicketId, claimOtpId, claimOtpCode);
+            const ticketData = response?.data || response;
+            
+            if (ticketData && ticketData.id) {
+                setShowClaimOtpModal(false);
+                setClaimOtpCode('');
+                setClaimOtpId(null);
+                setClaimOtpTicketId(null);
+                setSelectedTicket(ticketData);
+                await fetchTickets({ silent: true });
+                showToast('success', 'Ticket claimed successfully!');
+            }
+        } catch (error) {
+            console.error('Failed to verify OTP:', error);
+            setClaimOtpError(error?.message || 'Invalid OTP code. Please try again.');
+        } finally {
+            setIsVerifyingOtp(false);
         }
     };
 
@@ -383,6 +462,7 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
 
             await sendMessage(payload);
             await fetchConversationMessages(selectedTicket, { silent: true });
+            showToast('success', 'Message sent to the client.');
         } catch (error) {
             console.error('Failed to send message - Full error:', error);
             setConversationMessages((prev) => prev.filter((msg) => msg.id !== tempId));
@@ -1191,8 +1271,57 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                 {selectedTicket.image && (
                                     <div>
                                         <label className="text-[10px] font-bold text-[#bba99b] uppercase tracking-wider block mb-2">Attached Image</label>
-                                        <div className="rounded-xl border border-slate-200 dark:border-[#3a2f27] bg-slate-100 dark:bg-[#181411] p-2">
-                                            <img src={resolveTicketImageUrl(selectedTicket.image)} alt="Ticket attachment" className="rounded-lg max-h-[32rem] w-full object-contain" />
+                                        <div className="rounded-xl border border-slate-200 dark:border-[#3a2f27] bg-slate-100 dark:bg-[#181411] p-2 overflow-hidden">
+                                            {!ticketImageError ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setIsImagePreviewOpen(true)}
+                                                    className="block w-full rounded-lg overflow-hidden bg-white dark:bg-slate-950"
+                                                >
+                                                    <img
+                                                        src={resolveTicketImageUrl(selectedTicket.image)}
+                                                        alt="Ticket attachment"
+                                                        className="block rounded-lg max-h-[32rem] w-full object-contain"
+                                                        onError={() => setTicketImageError(true)}
+                                                    />
+                                                </button>
+                                            ) : (
+                                                <div className="flex flex-col items-start gap-3 rounded-lg border border-dashed border-slate-300 dark:border-[#5a4b3f] bg-white dark:bg-slate-950 p-4">
+                                                    <p className="text-sm font-semibold text-slate-700 dark:text-[#e4d7c9]">The attachment could not be previewed here.</p>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setIsImagePreviewOpen(true)}
+                                                        className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-bold text-white hover:bg-orange-600 transition-colors"
+                                                    >
+                                                        Open image preview
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {isImagePreviewOpen && selectedTicket.image && (
+                                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+                                        <div className="relative max-h-full w-full max-w-4xl rounded-3xl bg-slate-950 p-4 shadow-2xl ring-1 ring-white/10">
+                                            <div className="flex items-center justify-between gap-4 pb-3">
+                                                <p className="text-sm font-semibold text-white">Ticket image preview</p>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setIsImagePreviewOpen(false)}
+                                                    className="rounded-full bg-slate-800 p-2 text-slate-200 hover:bg-slate-700"
+                                                >
+                                                    Close
+                                                </button>
+                                            </div>
+                                            <div className="overflow-auto rounded-3xl border border-slate-700 bg-slate-900 p-2">
+                                                <img
+                                                    src={resolveTicketImageUrl(selectedTicket.image)}
+                                                    alt="Ticket attachment preview"
+                                                    className="mx-auto max-h-[80vh] w-auto max-w-full object-contain"
+                                                    onError={() => setTicketImageError(true)}
+                                                />
+                                            </div>
                                         </div>
                                     </div>
                                 )}
@@ -1343,6 +1472,63 @@ export function EmployeeDashboard({ user, onLogout, onNavigate, activeView }) {
                                         )}
                                     </button>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* OTP Claim Verification Modal */}
+            {showClaimOtpModal && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
+                    <div className="bg-white dark:bg-[#1e1a16] rounded-lg shadow-xl max-w-md w-full mx-4 border border-slate-200 dark:border-[#3a2f27]">
+                        <div className="p-6">
+                            <h2 className="text-xl font-semibold text-slate-900 dark:text-white mb-4">
+                                Confirm Ticket Acceptance
+                            </h2>
+                            <p className="text-sm text-slate-600 dark:text-[#bba99b] mb-6">
+                                An OTP has been sent to the admin. Please enter the 6-digit code to complete ticket acceptance.
+                            </p>
+
+                            {claimOtpError && (
+                                <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                                    <p className="text-sm text-red-700 dark:text-red-300">{claimOtpError}</p>
+                                </div>
+                            )}
+
+                            <input
+                                type="text"
+                                value={claimOtpCode}
+                                onChange={(e) => setClaimOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                                placeholder="Enter 6-digit code"
+                                maxLength="6"
+                                disabled={isVerifyingOtp}
+                                className="w-full px-4 py-2 border border-slate-300 dark:border-[#55463a] rounded-lg bg-white dark:bg-[#3a2f27] text-slate-900 dark:text-white text-center text-2xl tracking-widest mb-6 focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+                            />
+
+                            <div className="flex gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setShowClaimOtpModal(false);
+                                        setClaimOtpCode('');
+                                        setClaimOtpId(null);
+                                        setClaimOtpTicketId(null);
+                                        setClaimOtpError('');
+                                    }}
+                                    disabled={isVerifyingOtp}
+                                    className="flex-1 px-4 py-2 bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-white rounded-lg hover:bg-slate-300 dark:hover:bg-slate-600 transition-all disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleVerifyClaimOtp}
+                                    disabled={isVerifyingOtp || claimOtpCode.length !== 6}
+                                    className="flex-1 px-4 py-2 bg-primary hover:bg-orange-600 disabled:opacity-50 text-white rounded-lg transition-all font-medium"
+                                >
+                                    {isVerifyingOtp ? 'Verifying...' : 'Verify'}
+                                </button>
                             </div>
                         </div>
                     </div>

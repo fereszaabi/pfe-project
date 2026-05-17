@@ -292,8 +292,15 @@ class MessagingController extends Controller
             } elseif ($recipientType === 'client') {
                 $recipientUser = User::where('email', $recipient->mail ?? $recipient->email)
                     ->orWhere('cin', $recipient->cin)
+                    ->orWhere('code_fiscal', $recipient->code_fiscal)
                     ->first();
                 $recipientUserId = $recipientUser?->id;
+                \Log::info('Client recipient user lookup', [
+                    'client_email' => $recipient->mail ?? $recipient->email,
+                    'client_cin' => $recipient->cin,
+                    'client_code_fiscal' => $recipient->code_fiscal,
+                    'found_user_id' => $recipientUserId,
+                ]);
             } elseif ($recipientType === 'user') {
                 $recipientUserId = $recipient->id;
             }

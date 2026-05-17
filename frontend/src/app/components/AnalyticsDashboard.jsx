@@ -1,12 +1,11 @@
 import { useState, useEffect } from 'react';
-import { formatDistanceToNow } from 'date-fns';
 import {
     LineChart, Line, BarChart, Bar, AreaChart, Area,
-    XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart
+    XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
-import { getKpiMetrics, getTrendData, getAgentWorkload, getBacklogDetails, exportReport } from '../../services/api';
+import { getKpiMetrics, getTrendData, getAgentWorkload, getBacklogDetails, exportReport, downloadReport } from '../../services/api';
 
-export function AnalyticsDashboard({ user, onLogout, onNavigate }) {
+export function AnalyticsDashboard({ onLogout }) {
     const [activeTab, setActiveTab] = useState('kpis');
     const [dateRange, setDateRange] = useState({
         start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
@@ -68,15 +67,23 @@ export function AnalyticsDashboard({ user, onLogout, onNavigate }) {
     const handleExport = async (format) => {
         setExporting(true);
         try {
-            const response = await exportReport('kpis', format, dateRange.start, dateRange.end);
-            
             if (format === 'json') {
+                const response = await exportReport('kpis', format, dateRange.start, dateRange.end);
                 const blob = new Blob([JSON.stringify(response, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = `analytics_report_${new Date().toISOString().split('T')[0]}.json`;
                 a.click();
+                URL.revokeObjectURL(url);
+            } else {
+                const { blob, filename } = await downloadReport('kpis', format, dateRange.start, dateRange.end);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename || `analytics_report_${new Date().toISOString().split('T')[0]}.${format}`;
+                a.click();
+                URL.revokeObjectURL(url);
             }
         } catch (err) {
             console.error('Export failed:', err);
@@ -205,6 +212,14 @@ export function AnalyticsDashboard({ user, onLogout, onNavigate }) {
                         >
                             <span className="material-symbols-outlined text-base">download</span>
                             Export
+                        </button>
+                        <button
+                            onClick={() => handleExport('csv')}
+                            disabled={exporting}
+                            className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-semibold text-sm disabled:opacity-50 flex items-center gap-2 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800"
+                        >
+                            <span className="material-symbols-outlined text-base">table_view</span>
+                            CSV
                         </button>
                     </div>
                 </header>

@@ -65,6 +65,49 @@ async function apiUpload(method, path, formData, timeout = 10000) {
     }
 }
 
+async function apiDownload(method, path, body = null, timeout = 30000) {
+    const token = getToken();
+    const controller = new AbortController();
+    const opts = {
+        method,
+        headers: {
+            Accept: '*/*',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        signal: controller.signal,
+    };
+
+    if (body) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+    }
+
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    try {
+        const res = await fetch(BASE + path, opts);
+        if (!res.ok) {
+            const data = await res.json().catch(async () => ({ error: await res.text().catch(() => 'Request failed') }));
+            throw data;
+        }
+
+        const contentDisposition = res.headers.get('content-disposition') || '';
+        const filenameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+        const filename = decodeURIComponent(filenameMatch?.[1] || filenameMatch?.[2] || 'download');
+
+        return {
+            blob: await res.blob(),
+            filename,
+        };
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw { error: 'Request timed out. Please try again.' };
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 function buildQuery(params = {}) {
     const searchParams = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {
@@ -115,6 +158,9 @@ export const createTicket = (formData) =>
 
 export const deleteTicket = (id) =>
     apiRequest('DELETE', `/client/tickets/${id}`);
+
+export const updateClientTicket = (id, formData) =>
+    apiUpload('POST', `/client/tickets/${id}`, formData);
 
 // ── Machines ────────────────────────────────────────────────────────
 export const getMachines = () =>
@@ -174,6 +220,9 @@ export const claimTicket = (id) =>
 
 export const unclaimTicket = (id) =>
     apiRequest('POST', `/employee/tickets/${id}/unclaim`);
+
+export const verifyClaimOtp = (id, otpId, code) =>
+    apiRequest('POST', `/employee/tickets/${id}/claim-verify-otp`, { otp_id: otpId, code });
 
 export const updateEmployeeTicket = (id, data) =>
     apiRequest('PATCH', `/employee/tickets/${id}`, data);
@@ -296,6 +345,9 @@ export const getBacklogDetails = (startDate, endDate, priority = null) =>
 
 export const exportReport = (reportType, format, startDate, endDate) =>
     apiRequest('POST', '/analytics/export', { report_type: reportType, format, start_date: startDate, end_date: endDate });
+
+export const downloadReport = (reportType, format, startDate, endDate) =>
+    apiDownload('POST', '/analytics/export', { report_type: reportType, format, start_date: startDate, end_date: endDate });
 
 // ── Multi-Channel Communication ──────────────────────────────────────
 export const getAvailableChannels = () =>

@@ -50,6 +50,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('client/tickets/send-otp', [ClientController::class, 'sendTicketOtp']);
     Route::apiResource('client/tickets', ClientController::class)
          ->only(['index', 'store', 'show', 'destroy']);
+    Route::patch('client/tickets/{ticket}', [ClientController::class, 'update']);
     Route::get('client/logs', [ClientController::class, 'getLogs']);
     Route::get('client/logs/stream', [ClientController::class, 'streamLogs']);
         Route::patch('client/logs/{logId}/read', [ClientController::class, 'markLogRead']);
@@ -73,6 +74,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('employee/tickets', [EmployeeController::class, 'index']);
         Route::get('employee/tickets/{demande}', [EmployeeController::class, 'show']);
         Route::post('employee/tickets/{demande}/claim', [EmployeeController::class, 'claim']);
+        Route::post('employee/tickets/{demande}/claim-verify-otp', [EmployeeController::class, 'verifyClaimOtp']);
         Route::post('employee/tickets/{demande}/unclaim', [EmployeeController::class, 'unclaim']);
         Route::patch('employee/tickets/{demande}', [EmployeeController::class, 'update']);
         Route::post('employee/tickets/{demande}/rate', [EmployeeController::class, 'rate']);

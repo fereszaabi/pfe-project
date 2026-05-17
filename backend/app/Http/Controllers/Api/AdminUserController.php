@@ -8,6 +8,8 @@ use App\Models\Admin;
 use App\Models\Employee;
 use App\Models\Demande;
 use App\Models\Client;
+use App\Models\Conversation;
+use App\Models\Message;
 use App\Events\TicketUpdated;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -101,7 +103,7 @@ class AdminUserController extends Controller
             $nom = $nameParts[0] ?? $request->name;
             $prenom = $nameParts[1] ?? $nom;
 
-            Client::create([
+            $client = Client::create([
                 'nom' => $nom,
                 'prenom' => $request->prenom ?? $prenom,
                 'mail' => $request->email,
@@ -112,6 +114,17 @@ class AdminUserController extends Controller
                 'money' => 0,
                 'client_state' => 'active',
             ]);
+
+            try {
+                $otpCode = random_int(100000, 999999);
+                app(LocalOtpCodeStore::class)->record('client', $request->email, $otpCode, [
+                    'client_id' => $client->id,
+                    'client_name' => trim($client->nom . ' ' . $client->prenom),
+                    'cache_key' => 'client_creation:' . $client->id,
+                ]);
+            } catch (\Throwable $e) {
+                // Keep client creation successful even if OTP logging fails.
+            }
         }
 
         return response()->json($user, 201);
@@ -276,15 +289,44 @@ class AdminUserController extends Controller
             }
         }
 
+        $newBalance = (float) $client->fresh()->money;
+
+        try {
+            \App\Models\Log::create([
+                'client_id' => $client->id,
+                'description' => sprintf(
+                    'Admin updated your balance via %s by %.2f TND. New balance: %.2f TND',
+                    $operation,
+                    $amount,
+                    $newBalance
+                ),
+                'status' => 'balance_change',
+                'created_at_demande' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // Keep the balance update even if notification logging fails.
+        }
+
         return response()->json([
             'message' => 'Balance updated successfully',
-            'client' => $client->fresh()
+            'client' => $client->fresh(),
         ]);
     }
 
     public function takeMoney(Request $request, Client $client)
     {
         $client->decrement('money', $request->amount);
+
+        try {
+            \App\Models\Log::create([
+                'client_id' => $client->id,
+                'description' => 'Admin removed ' . abs((float) $request->amount) . ' TND from your balance. New balance: ' . (float) $client->fresh()->money,
+                'status' => 'balance_change',
+                'created_at_demande' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            // Ignore notification logging failures.
+        }
 
         return response()->json($client->fresh());
     }
@@ -307,9 +349,44 @@ class AdminUserController extends Controller
     {
         $limit = (int) $request->integer('limit', 20);
 
+        // Get local OTP codes
+        $localOtpCodes = app(LocalOtpCodeStore::class)->latest($limit);
+
+        // Get ticket acceptance OTPs from database
+        $ticketOtps = \App\Models\TicketAcceptanceOtp::with(['employee', 'demande'])
+            ->where('expires_at', '>', now())
+            ->orderBy('created_at', 'desc')
+            ->limit($limit)
+            ->get()
+            ->map(function ($otp) {
+                return [
+                    'code' => $otp->code,
+                    'recipient' => $otp->recipient,
+                    'type' => 'emp', // Employee ticket acceptance
+                    'created_at' => $otp->created_at,
+                    'expires_at' => $otp->expires_at,
+                    'cache_key' => "ticket_acceptance_otp_{$otp->id}",
+                    'employee_name' => $otp->employee?->name ?? $otp->employee?->nom ?? 'Unknown',
+                    'ticket_id' => $otp->demande_id,
+                    'verified' => $otp->verified,
+                ];
+            })
+            ->toArray();
+
+        // Merge both arrays and sort by created_at descending
+        $allCodes = array_merge($localOtpCodes, $ticketOtps);
+        usort($allCodes, function ($a, $b) {
+            $dateA = strtotime($a['created_at'] ?? 0);
+            $dateB = strtotime($b['created_at'] ?? 0);
+            return $dateB - $dateA;
+        });
+
+        // Limit to requested amount
+        $allCodes = array_slice($allCodes, 0, $limit);
+
         return response()->json([
             'ok' => true,
-            'codes' => app(LocalOtpCodeStore::class)->latest($limit),
+            'codes' => $allCodes,
         ]);
     }
 
@@ -934,8 +1011,8 @@ class AdminUserController extends Controller
                     // Delete the ticket
                     $ticket->delete();
 
-                    // Broadcast the deletion event
-                    broadcast(new TicketUpdated(null))->toOthers();
+                    // Broadcast the deletion event using the ticket snapshot before removal
+                    broadcast(new TicketUpdated($ticket))->toOthers();
                 });
 
                 return response()->json([

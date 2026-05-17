@@ -4,8 +4,12 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
 use App\Models\Client;
 use App\Models\ClientPhoneNumber;
+use App\Models\Conversation;
+use App\Models\Message;
+use App\Models\User;
 
 class ClientProfileController extends Controller
 {
@@ -34,11 +38,15 @@ class ClientProfileController extends Controller
     public function updateProfile(Request $request)
     {
         $request->validate([
+            'name' => 'sometimes|string|max:255',
             'nom' => 'sometimes|string|max:255',
             'prenom' => 'sometimes|string|max:255',
             'business_type' => 'sometimes|string|max:255',
             'description' => 'sometimes|string|max:1000',
             'mail' => 'sometimes|email',
+            'current_password' => 'sometimes|string',
+            'new_password' => 'sometimes|string|min:8|same:confirm_password',
+            'confirm_password' => 'sometimes|string',
         ]);
 
         $user = $request->user();
@@ -52,13 +60,104 @@ class ClientProfileController extends Controller
             return response()->json(['message' => 'Client record not found'], 404);
         }
 
-        $clientRecord->update($request->only(['nom', 'prenom', 'business_type', 'description', 'mail']));
-        $user->update($request->only(['name'])); // Update User record name if provided
+        $profileUpdates = array_filter([
+            'nom' => $request->input('nom'),
+            'prenom' => $request->input('prenom'),
+            'business_type' => $request->input('business_type'),
+            'description' => $request->input('description'),
+            'mail' => $request->input('mail', $request->input('email')),
+        ], static fn ($value) => $value !== null);
+
+        if (!empty($profileUpdates)) {
+            $clientRecord->update($profileUpdates);
+        }
+
+        $userUpdates = array_filter([
+            'name' => $request->input('name', $request->input('nom')),
+            'email' => $request->input('mail', $request->input('email')),
+        ], static fn ($value) => $value !== null);
+
+        if (!empty($userUpdates)) {
+            $user->update($userUpdates);
+        }
+
+        $profileChanged = $request->filled('nom')
+            || $request->filled('prenom')
+            || $request->filled('business_type')
+            || $request->filled('description')
+            || $request->filled('mail');
+
+        $credentialsChanged = false;
+        if ($request->filled('new_password')) {
+            if (!Hash::check((string) $request->input('current_password'), (string) $clientRecord->password)) {
+                return response()->json(['message' => 'Current password is incorrect'], 422);
+            }
+
+            $clientRecord->update([
+                'password' => $request->input('new_password'),
+            ]);
+
+            $user->update([
+                'password' => $request->input('new_password'),
+            ]);
+
+            $credentialsChanged = true;
+        }
+
+        if ($profileChanged || $credentialsChanged) {
+            $this->notifyAdminsOfClientChange($clientRecord, $user, $profileChanged, $credentialsChanged);
+        }
 
         return response()->json([
             'message' => 'Profile updated successfully',
             'profile' => $clientRecord->getProfileData(),
         ]);
+    }
+
+    private function notifyAdminsOfClientChange(Client $clientRecord, $user, bool $profileChanged, bool $credentialsChanged): void
+    {
+        $admins = User::where('role', 'admin')->get();
+        if ($admins->isEmpty()) {
+            return;
+        }
+
+        $parts = [];
+        if ($profileChanged) {
+            $parts[] = 'profile details';
+        }
+        if ($credentialsChanged) {
+            $parts[] = 'credentials';
+        }
+
+        $messageText = sprintf(
+            'Client %s updated their %s.',
+            $clientRecord->nom ?: ($user->name ?? 'account'),
+            implode(' and ', $parts)
+        );
+
+        foreach ($admins as $admin) {
+            try {
+                $conversation = Conversation::findOrCreateBetweenWithTypes(
+                    (int) $clientRecord->id,
+                    'client',
+                    (int) $admin->id,
+                    'user'
+                );
+
+                Message::create([
+                    'conversation_id' => $conversation->id,
+                    'sender_id' => $clientRecord->id,
+                    'sender_type' => 'client',
+                    'recipient_id' => $admin->id,
+                    'recipient_type' => 'user',
+                    'message' => $messageText,
+                    'message_type' => 'notification',
+                    'created_at' => now(),
+                ]);
+            } catch (\Throwable $e) {
+                // Do not block the profile update if admin notification fails.
+            }
+        }
     }
 
     /**

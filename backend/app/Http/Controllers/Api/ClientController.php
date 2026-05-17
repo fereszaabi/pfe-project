@@ -12,8 +12,10 @@ use App\Models\Employee;
 use App\Events\TicketUpdated;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use App\Services\LocalOtpCodeStore;
 use Laravel\Sanctum\PersonalAccessToken;
+use Illuminate\Support\Facades\Storage;
 
 class ClientController extends Controller
 {
@@ -486,7 +488,71 @@ class ClientController extends Controller
      */
     public function update(Request $request, Demande $demande)
     {
-        //
+        $user = $request->user();
+        $client = $this->resolveClient($user);
+
+        if (!$client) {
+            return response()->json(['error' => 'Client not found'], 404);
+        }
+
+        // Ensure the ticket belongs to the authenticated client
+        if ($demande->id_client !== $client->id) {
+            return response()->json(['error' => 'Unauthorized'], 403);
+        }
+
+        // Validate input
+        $validated = $request->validate([
+            'titre' => 'nullable|string|max:255',
+            'description' => 'nullable|string',
+            'image' => 'nullable|image|mimes:jpeg,png,gif,webp|max:5120',
+        ]);
+
+        // Only allow updates if ticket is not resolved/closed
+        if (in_array($demande->status, ['resolved', 'closed'], true)) {
+            return response()->json([
+                'message' => 'Cannot update completed/closed tickets'
+            ], 422);
+        }
+
+        // Update ticket fields if provided
+        if (isset($validated['titre'])) {
+            $demande->titre = $validated['titre'];
+        }
+
+        if (isset($validated['description'])) {
+            $demande->description = $validated['description'];
+        }
+
+        // Handle image upload if provided
+        if ($request->hasFile('image')) {
+            // Delete old image if exists
+            if ($demande->image) {
+                $oldPath = str_replace('storage/', 'public/', $demande->image);
+                if (Storage::exists($oldPath)) {
+                    Storage::delete($oldPath);
+                }
+            }
+
+            // Store new image
+            $path = $request->file('image')->store('tickets', 'public');
+            $demande->image = 'storage/app/public/' . $path;
+        }
+
+        $demande->save();
+
+        // Load relationships
+        $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
+
+        // Broadcast update to employee if assigned
+        if ($updatedTicket->id_employee) {
+            broadcast(new TicketUpdated($updatedTicket))->toOthers();
+        }
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Ticket updated successfully',
+            'ticket' => $updatedTicket,
+        ]);
     }
 
     /**

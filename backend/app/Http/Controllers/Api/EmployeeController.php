@@ -190,7 +190,7 @@ class EmployeeController extends Controller
     }
 
     /**
-     * Claim/Assign a ticket to self
+     * Request to claim/assign a ticket to self - generates OTP for verification
      */
     public function claim(Request $request, Demande $demande)
     {
@@ -206,8 +206,11 @@ class EmployeeController extends Controller
         
         // If user is not directly an Employee, find the Employee record
         $employeeId = null;
+        $employee = null;
+        
         if ($user instanceof \App\Models\Employee) {
             $employeeId = $user->id;
+            $employee = $user;
         } else {
             // Search for employee by email, cin, or name
             $employee = \App\Models\Employee::where('email', $user->email)
@@ -222,21 +225,140 @@ class EmployeeController extends Controller
             $employeeId = $employee->id;
         }
 
+        // Generate OTP for ticket acceptance
+        $otp = \App\Models\TicketAcceptanceOtp::create([
+            'demande_id' => $demande->id,
+            'employee_id' => $employeeId,
+            'code' => \App\Models\TicketAcceptanceOtp::generateCode(),
+            'recipient' => $employee->email ?? $user->email,
+            'type' => 'emp',
+            'expires_at' => Carbon::now()->addMinutes(10),
+        ]);
+
+        // Store OTP in cache for admin viewing
+        \Cache::put("ticket_acceptance_otp_{$otp->id}", [
+            'code' => $otp->code,
+            'employee' => $employee->name ?? $employee->nom ?? 'Employee',
+            'ticket_id' => $demande->id,
+            'recipient' => $otp->recipient,
+            'type' => 'emp',
+            'expires_at' => $otp->expires_at,
+            'created_at' => $otp->created_at,
+            'cache_key' => "ticket_acceptance_otp_{$otp->id}",
+        ], 10 * 60);
+
+        return response()->json([
+            'message' => 'OTP sent to admin. Please enter OTP to confirm ticket acceptance.',
+            'otp_id' => $otp->id,
+            'requires_otp' => true,
+            'otp_expires_in' => 600, // 10 minutes in seconds
+        ], 200);
+    }
+
+    /**
+     * Verify OTP and complete ticket claim
+     */
+    public function verifyClaimOtp(Request $request, Demande $demande)
+    {
+        $validated = $request->validate([
+            'otp_id' => 'required|integer|exists:ticket_acceptance_otps,id',
+            'code' => 'required|string|size:6',
+        ]);
+
+        // Can only claim unassigned tickets
+        if ($demande->id_employee !== null) {
+            return response()->json([
+                'message' => 'This ticket is already assigned to ' . $demande->employee->name,
+            ], 422);
+        }
+
+        $otp = \App\Models\TicketAcceptanceOtp::find($validated['otp_id']);
+
+        // Verify OTP belongs to this ticket
+        if ($otp->demande_id !== $demande->id) {
+            return response()->json([
+                'message' => 'OTP does not match this ticket',
+            ], 422);
+        }
+
+        // Get the current employee
+        $user = $request->user();
+        $employeeId = null;
+        $employee = null;
+        
+        if ($user instanceof \App\Models\Employee) {
+            $employeeId = $user->id;
+            $employee = $user;
+        } else {
+            $employee = \App\Models\Employee::where('email', $user->email)
+                ->orWhere('cin', $user->cin)
+                ->first();
+            if (!$employee) {
+                return response()->json(['message' => 'Employee record not found'], 404);
+            }
+            $employeeId = $employee->id;
+        }
+
+        // Verify employee matches
+        if ($otp->employee_id !== $employeeId) {
+            return response()->json([
+                'message' => 'This OTP was not generated for your claim request',
+            ], 403);
+        }
+
+        // Check if OTP is locked
+        if ($otp->isLocked()) {
+            return response()->json([
+                'message' => 'Too many incorrect attempts. Please try again later.',
+            ], 429);
+        }
+
+        // Check if OTP is expired
+        if ($otp->isExpired()) {
+            return response()->json([
+                'message' => 'OTP has expired. Please request a new one.',
+            ], 422);
+        }
+
+        // Check if already verified
+        if ($otp->verified) {
+            return response()->json([
+                'message' => 'This OTP has already been used.',
+            ], 422);
+        }
+
+        // Verify OTP code
+        if ($otp->code !== trim($validated['code'])) {
+            $otp->incrementAttempts();
+            return response()->json([
+                'message' => 'Incorrect OTP code. Please try again.',
+                'attempts_remaining' => max(0, 5 - $otp->attempts),
+            ], 422);
+        }
+
+        // OTP verified successfully - complete the ticket claim
+        $otp->update([
+            'verified' => true,
+            'verified_at' => Carbon::now(),
+        ]);
+
+        // Assign ticket to employee
         $demande->update([
             'id_employee' => $employeeId,
             'assigned_at' => Carbon::now(),
-            'status' => 'in progress', // automatically set to in progress when claimed
+            'status' => 'in progress',
         ]);
 
         // Update employee workload
-        $employee = \App\Models\Employee::find($employeeId);
-        if ($employee) {
-            $employee->increment('current_workload');
-        }
+        $employee->increment('current_workload');
+
+        // Load relationships and broadcast update
+        $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
+        broadcast(new TicketUpdated($updatedTicket))->toOthers();
 
         return response()->json([
             'message' => 'Ticket claimed successfully',
-            'data' => $demande->fresh()->load(['client', 'employee', 'machine']),
+            'data' => $updatedTicket,
         ], 200);
     }
 
@@ -283,7 +405,11 @@ class EmployeeController extends Controller
             $employee->decrement('current_workload');
         }
 
-        return response()->json($demande->fresh()->load(['client', 'employee', 'machine']));
+        // Load relationships and broadcast update
+        $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
+        broadcast(new TicketUpdated($updatedTicket))->toOthers();
+
+        return response()->json($updatedTicket);
     }
 
     /**

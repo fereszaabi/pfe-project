@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { getClientTicket, deleteTicket, getTicketMessages, sendMessage, deleteTicketImage } from '../../services/api';
+import { getClientTicket, deleteTicket, getTicketMessages, sendMessage, deleteTicketImage, updateClientTicket, rateEmployee } from '../../services/api';
 import { getEcho } from '../../services/realtime';
 
 export function TicketTracking({ ticketId, onBack }) {
@@ -10,19 +10,49 @@ export function TicketTracking({ ticketId, onBack }) {
     const [postingUpdate, setPostingUpdate] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [notificationToast, setNotificationToast] = useState(null);
     const [notifications, setNotifications] = useState([]);
     const [unreadCount, setUnreadCount] = useState(0);
     const [showNotifications, setShowNotifications] = useState(false);
     const [previousStatus, setPreviousStatus] = useState(null);
-    const [notificationToast, setNotificationToast] = useState(null);
     const [conversationMessages, setConversationMessages] = useState([]);
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [messageText, setMessageText] = useState('');
     const [isSubmittingMessage, setIsSubmittingMessage] = useState(false);
     const [showChat, setShowChat] = useState(false);
+    const [isImagePreviewOpen, setIsImagePreviewOpen] = useState(false);
     const messagesEndRef = useRef(null);
     const lastSeenMessageIdRef = useRef(null);
     const ticketDetailCacheRef = useRef(new Map());
+    const [isEditing, setIsEditing] = useState(false);
+    const [editForm, setEditForm] = useState({
+        titre: '',
+        description: '',
+        image: null,
+    });
+    const [updatingTicket, setUpdatingTicket] = useState(false);
+    const [ratingValue, setRatingValue] = useState(0);
+    const [ratingComment, setRatingComment] = useState('');
+    const [isSubmittingRating, setIsSubmittingRating] = useState(false);
+    const [ratingError, setRatingError] = useState('');
+
+    const pushNotification = ({ type, title, message }) => {
+        const newNotification = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            type,
+            title,
+            message,
+            timestamp: new Date(),
+            read: false,
+        };
+
+        setNotifications((prev) => [newNotification, ...prev]);
+        setUnreadCount((prev) => prev + 1);
+        setNotificationToast(newNotification);
+        setTimeout(() => {
+            setNotificationToast((current) => (current?.id === newNotification.id ? null : current));
+        }, 5000);
+    };
 
     const ticketTimeline = ticket ? [
         {
@@ -79,13 +109,28 @@ export function TicketTracking({ ticketId, onBack }) {
         return false;
     };
 
-    const BACKEND_BASE_URL = 'http://127.0.0.1:8000';
+    const BACKEND_BASE_URL = (import.meta.env.VITE_API_ROOT || 'http://127.0.0.1:8000').replace(/\/$/, '');
 
     const resolveTicketImageUrl = (imagePath) => {
         if (!imagePath || typeof imagePath !== 'string') return '';
-        if (/^https?:\/\//i.test(imagePath) || imagePath.startsWith('data:') || imagePath.startsWith('blob:')) return imagePath;
-        if (imagePath.startsWith('/')) return `${BACKEND_BASE_URL}${imagePath}`;
-        const normalized = imagePath.replace(/^storage\//, '');
+
+        const normalizedInput = imagePath.trim().replace(/\\/g, '/');
+
+        if (/^https?:\/\//i.test(normalizedInput) || normalizedInput.startsWith('data:') || normalizedInput.startsWith('blob:')) {
+            return normalizedInput;
+        }
+
+        if (normalizedInput.startsWith('/')) {
+            return `${BACKEND_BASE_URL}${normalizedInput}`;
+        }
+
+        const normalized = normalizedInput
+            .replace(/^\.\//, '')
+            .replace(/^storage\/app\/public\//, '')
+            .replace(/^public\//, '')
+            .replace(/^storage\//, '')
+            .replace(/^\/+/, '');
+
         return `${BACKEND_BASE_URL}/storage/${normalized}`;
     };
 
@@ -156,18 +201,11 @@ export function TicketTracking({ ticketId, onBack }) {
             });
 
             if (isMessageFromTechnician(incoming)) {
-                const newNotification = {
-                    id: Date.now(),
+                pushNotification({
                     type: 'message',
                     title: 'New Message',
                     message: `New message from technician: ${incoming.message?.slice(0, 60) || ''}`,
-                    timestamp: new Date(),
-                    read: false,
-                };
-                setNotifications((prev) => [newNotification, ...prev]);
-                setUnreadCount((prev) => prev + 1);
-                setNotificationToast(newNotification);
-                setTimeout(() => setNotificationToast(null), 5000);
+                });
             }
         };
 
@@ -180,36 +218,36 @@ export function TicketTracking({ ticketId, onBack }) {
             if (!updatedTicket) return;
 
             setTicket((prev) => {
-                if (!prev) return updatedTicket;
+                if (!prev) {
+                    pushNotification({
+                        type: 'update',
+                        title: 'Ticket Updated',
+                        message: `Ticket #${updatedTicket.id} was updated.`,
+                    });
+                    return updatedTicket;
+                }
 
-                if (updatedTicket.status && prev.status && updatedTicket.status !== prev.status) {
-                    const newNotification = {
-                        id: Date.now(),
+                const statusChanged = updatedTicket.status && prev.status && updatedTicket.status !== prev.status;
+                const assignmentChanged = !prev.id_employee && updatedTicket.id_employee;
+
+                if (statusChanged) {
+                    pushNotification({
                         type: 'status_change',
                         title: 'Ticket Status Updated',
                         message: `Status changed from ${prev.status} to ${updatedTicket.status}`,
-                        timestamp: new Date(),
-                        read: false,
-                        oldStatus: prev.status,
-                        newStatus: updatedTicket.status,
-                    };
-                    setNotifications((prevNotifs) => [newNotification, ...prevNotifs]);
-                    setUnreadCount((prevCount) => prevCount + 1);
-                    setNotificationToast(newNotification);
-                    setTimeout(() => setNotificationToast(null), 5000);
-                } else if (updatedTicket.employee && !prev.employee && updatedTicket.id_employee) {
-                    const newNotification = {
-                        id: Date.now(),
+                    });
+                } else if (assignmentChanged) {
+                    pushNotification({
                         type: 'assignment',
                         title: 'Ticket Assigned',
-                        message: `Your ticket has been assigned to ${updatedTicket.employee.name}`,
-                        timestamp: new Date(),
-                        read: false,
-                    };
-                    setNotifications((prevNotifs) => [newNotification, ...prevNotifs]);
-                    setUnreadCount((prevCount) => prevCount + 1);
-                    setNotificationToast(newNotification);
-                    setTimeout(() => setNotificationToast(null), 5000);
+                        message: `Your ticket has been assigned to ${updatedTicket.employee?.name || 'a technician'}`,
+                    });
+                } else {
+                    pushNotification({
+                        type: 'update',
+                        title: 'Ticket Updated',
+                        message: `Ticket #${updatedTicket.id} has been updated.`,
+                    });
                 }
 
                 return { ...prev, ...updatedTicket };
@@ -395,6 +433,11 @@ export function TicketTracking({ ticketId, onBack }) {
             setMessageText('');
             // Refresh messages
             await fetchConversationMessages();
+            pushNotification({
+                type: 'message',
+                title: 'Message Sent',
+                message: 'Your message was sent to the technician.',
+            });
         } catch (error) {
             console.error('Failed to send message - Full error:', error);
             const errorMessage = error?.message || error?.error || JSON.stringify(error);
@@ -431,6 +474,11 @@ export function TicketTracking({ ticketId, onBack }) {
 
             setComment('');
             await fetchConversationMessages();
+            pushNotification({
+                type: 'message',
+                title: 'Update Posted',
+                message: 'Your update was posted to the technician.',
+            });
         } catch (error) {
             const errorMessage = error?.message || error?.error || 'Failed to post update.';
             alert(errorMessage);
@@ -442,6 +490,109 @@ export function TicketTracking({ ticketId, onBack }) {
     const markAsRead = (notifId) => {
         setNotifications(prev => prev.map(n => n.id === notifId ? { ...n, read: true } : n));
         setUnreadCount(prev => Math.max(0, prev - 1));
+    };
+
+    const handleStartEdit = () => {
+        setEditForm({
+            titre: ticket.titre || '',
+            description: ticket.description || '',
+            image: null,
+        });
+        setIsEditing(true);
+    };
+
+    const handleCancelEdit = () => {
+        setIsEditing(false);
+        setEditForm({
+            titre: '',
+            description: '',
+            image: null,
+        });
+    };
+
+    const handleEditFormChange = (field, value) => {
+        setEditForm(prev => ({
+            ...prev,
+            [field]: value,
+        }));
+    };
+
+    const handleImageChange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            setEditForm(prev => ({
+                ...prev,
+                image: file,
+            }));
+        }
+    };
+
+    const handleUpdateTicket = async () => {
+        if (!editForm.titre.trim() || !editForm.description.trim()) {
+            alert('Title and description are required.');
+            return;
+        }
+
+        setUpdatingTicket(true);
+        try {
+            const formData = new FormData();
+            formData.append('titre', editForm.titre.trim());
+            formData.append('description', editForm.description.trim());
+            if (editForm.image) {
+                formData.append('image', editForm.image);
+            }
+            formData.append('_method', 'PATCH');
+
+            await updateClientTicket(ticketId, formData);
+            setIsEditing(false);
+            await loadTicket();
+            pushNotification({
+                type: 'update',
+                title: 'Ticket Updated',
+                message: 'Your ticket has been successfully updated.',
+            });
+        } catch (error) {
+            console.error('Failed to update ticket:', error);
+            const errorMessage = error?.message || error?.error || 'Failed to update ticket.';
+            alert(errorMessage);
+        } finally {
+            setUpdatingTicket(false);
+        }
+    };
+
+    const handleSubmitRating = async () => {
+        if (!['resolved', 'closed'].includes(ticket.status)) {
+            setRatingError('You can only rate a ticket after it has been resolved.');
+            return;
+        }
+
+        if (ratingValue < 1) {
+            setRatingError('Please select a rating before submitting.');
+            return;
+        }
+
+        setIsSubmittingRating(true);
+        try {
+            const response = await rateEmployee(ticketId, ratingValue, ratingComment);
+            const updatedTicket = response?.ticket || response;
+            if (updatedTicket) {
+                setTicket(updatedTicket);
+                setRatingError('');
+                setRatingValue(0);
+                setRatingComment('');
+                pushNotification({
+                    type: 'update',
+                    title: 'Rating Submitted',
+                    message: 'Thank you for rating the technician. Your feedback has been recorded.',
+                });
+            }
+        } catch (error) {
+            console.error('Failed to submit rating:', error);
+            const message = error?.message || error?.error || 'Unable to submit rating at this time.';
+            setRatingError(message);
+        } finally {
+            setIsSubmittingRating(false);
+        }
     };
 
     const handleDeleteTicket = async () => {
@@ -503,6 +654,12 @@ export function TicketTracking({ ticketId, onBack }) {
                                 )}
                                 {notificationToast.type === 'assignment' && (
                                     <span className="material-symbols-outlined text-emerald-500 text-xl">person_add</span>
+                                )}
+                                {notificationToast.type === 'message' && (
+                                    <span className="material-symbols-outlined text-blue-500 text-xl">chat</span>
+                                )}
+                                {notificationToast.type === 'update' && (
+                                    <span className="material-symbols-outlined text-slate-500 text-xl">info</span>
                                 )}
                             </div>
                             <div className="flex-1">
@@ -671,7 +828,12 @@ export function TicketTracking({ ticketId, onBack }) {
                         </h1>
                     </div>
                     <div className="flex gap-3">
-                    
+                        <button 
+                            onClick={handleStartEdit}
+                            className="flex items-center gap-2 px-4 py-2 bg-primary hover:bg-orange-600 text-white rounded-lg text-sm font-bold transition-colors"
+                        >
+                            <span className="material-symbols-outlined text-lg">edit</span> Edit Ticket
+                        </button>
                         <button 
                             onClick={() => setShowDeleteConfirm(true)}
                             className="flex items-center gap-2 px-4 py-2 bg-red-100 dark:bg-red-900/30 hover:bg-red-200 dark:hover:bg-red-900/50 text-red-600 dark:text-red-400 rounded-lg text-sm font-bold transition-colors"
@@ -692,21 +854,84 @@ export function TicketTracking({ ticketId, onBack }) {
 
                             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
                                 <div className="rounded-xl border border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-900/30 p-4 lg:col-span-2">
-                                    <div className="flex items-start justify-between gap-4">
-                                        <div>
-                                            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Portal Summary</p>
-                                            <h4 className="text-xl font-bold mt-1">#{ticket.id} {ticket.titre || 'Support Ticket'}</h4>
-                                            <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 max-w-3xl">
-                                                {ticket.description || 'No description provided.'}
-                                            </p>
+                                    {isEditing ? (
+                                        <div className="space-y-4">
+                                            <div>
+                                                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Ticket Title</label>
+                                                <input
+                                                    type="text"
+                                                    value={editForm.titre}
+                                                    onChange={(e) => handleEditFormChange('titre', e.target.value)}
+                                                    className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent"
+                                                    placeholder="Enter ticket title..."
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Description</label>
+                                                <textarea
+                                                    value={editForm.description}
+                                                    onChange={(e) => handleEditFormChange('description', e.target.value)}
+                                                    rows={4}
+                                                    className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent resize-none"
+                                                    placeholder="Describe your issue..."
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Update Image (optional)</label>
+                                                <input
+                                                    type="file"
+                                                    accept="image/*"
+                                                    onChange={handleImageChange}
+                                                    className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-primary file:text-white hover:file:bg-orange-600"
+                                                />
+                                                {editForm.image && (
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                                        Selected: {editForm.image.name}
+                                                    </p>
+                                                )}
+                                            </div>
+                                            <div className="flex gap-3 pt-4">
+                                                <button
+                                                    onClick={handleUpdateTicket}
+                                                    disabled={updatingTicket}
+                                                    className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    {updatingTicket ? (
+                                                        <>
+                                                            <span className="animate-spin">⟳</span> Updating...
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <span className="material-symbols-outlined text-sm">save</span> Save Changes
+                                                        </>
+                                                    )}
+                                                </button>
+                                                <button
+                                                    onClick={handleCancelEdit}
+                                                    disabled={updatingTicket}
+                                                    className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-sm font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
                                         </div>
-                                        <div className="text-right">
-                                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Priority</p>
-                                            <span className="inline-flex mt-2 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-                                                {ticket.priority || 'normal'}
-                                            </span>
+                                    ) : (
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div>
+                                                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Portal Summary</p>
+                                                <h4 className="text-xl font-bold mt-1">#{ticket.id} {ticket.titre || 'Support Ticket'}</h4>
+                                                <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 max-w-3xl">
+                                                    {ticket.description || 'No description provided.'}
+                                                </p>
+                                            </div>
+                                            <div className="text-right">
+                                                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Priority</p>
+                                                <span className="inline-flex mt-2 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                                                    {ticket.priority || 'normal'}
+                                                </span>
+                                            </div>
                                         </div>
-                                    </div>
+                                    )}
                                 </div>
 
                                 <div className="rounded-xl border border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-900/30 p-4">
@@ -836,19 +1061,91 @@ export function TicketTracking({ ticketId, onBack }) {
                                             <p className="text-sm text-slate-500 dark:text-slate-400">Visible to both you and the technician.</p>
                                         </div>
                                         <div className="flex gap-2">
-                                            <a
-                                                href={resolveTicketImageUrl(ticket.image)}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                                className="px-3 py-2 border border-slate-200 dark:border-border-dark rounded-lg text-sm font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
-                                            >
-                                                Open
-                                            </a>
                                             <button onClick={handleDeleteImage} className="px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold transition-colors">Delete Image</button>
                                         </div>
                                     </div>
                                     <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-border-dark bg-slate-50 dark:bg-slate-900/30">
-                                        <img src={resolveTicketImageUrl(ticket.image)} alt="Attachment" className="w-full max-h-80 object-contain bg-white dark:bg-slate-950" />
+                                        <img
+                                            src={resolveTicketImageUrl(ticket.image)}
+                                            alt="Attachment"
+                                            onClick={() => setIsImagePreviewOpen(true)}
+                                            className="w-full max-h-80 object-contain bg-white dark:bg-slate-950 cursor-pointer"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                            {isImagePreviewOpen && ticket.image && (
+                                <div className="fixed inset-0 z-50 bg-black/90 p-4 flex items-center justify-center" onClick={() => setIsImagePreviewOpen(false)}>
+                                    <div className="relative max-w-[95vw] max-h-[95vh] flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
+                                        <button
+                                            onClick={() => setIsImagePreviewOpen(false)}
+                                            className="absolute top-4 right-4 z-20 rounded-full bg-white/20 hover:bg-white/40 p-2 text-white transition-colors"
+                                            title="Close preview"
+                                        >
+                                            <span className="material-symbols-outlined text-2xl">close</span>
+                                        </button>
+                                        <img
+                                            src={resolveTicketImageUrl(ticket.image)}
+                                            alt="Attachment preview"
+                                            className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+
+                            {['resolved', 'closed'].includes(ticket.status) && !ticket.client_rating && (
+                                <div className="mt-6 rounded-xl border border-emerald-200 dark:border-emerald-900/40 bg-emerald-50 dark:bg-emerald-900/10 p-6 shadow-sm">
+                                    <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-3">Rate Your Technician</h3>
+                                    <p className="text-sm text-slate-600 dark:text-slate-300 mb-4">
+                                        This ticket has been resolved. Please rate the technician and leave optional feedback to help us improve service.
+                                    </p>
+
+                                    <div className="flex items-center gap-1 mb-4">
+                                        {[1, 2, 3, 4, 5].map((star) => (
+                                            <button
+                                                key={star}
+                                                type="button"
+                                                onClick={() => setRatingValue(star)}
+                                                className={`material-symbols-outlined text-4xl transition-colors ${ratingValue >= star ? 'text-amber-400' : 'text-slate-300 dark:text-slate-600'}`}
+                                                aria-label={`Rate ${star} stars`}
+                                            >
+                                                star
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    <textarea
+                                        value={ratingComment}
+                                        onChange={(e) => setRatingComment(e.target.value)}
+                                        placeholder="Optional feedback for the technician..."
+                                        className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                                        rows={4}
+                                    />
+
+                                    {ratingError && (
+                                        <p className="mt-3 text-sm text-red-600 dark:text-red-400">{ratingError}</p>
+                                    )}
+
+                                    <div className="mt-4 flex justify-end gap-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setRatingValue(0);
+                                                setRatingComment('');
+                                                setRatingError('');
+                                            }}
+                                            className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                        >
+                                            Clear
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={handleSubmitRating}
+                                            disabled={isSubmittingRating || ratingValue === 0}
+                                            className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            {isSubmittingRating ? 'Submitting...' : 'Submit Rating'}
+                                        </button>
                                     </div>
                                 </div>
                             )}

@@ -73,13 +73,31 @@ export function ClientProfile({ user, onLogout, onNavigate, activeView }) {
         setSaveError('');
         setSaveSuccess('');
         setIsSaving(true);
+
+        if (profileData.newPassword || profileData.confirmPassword || profileData.currentPassword) {
+            if (!profileData.currentPassword || !profileData.newPassword || !profileData.confirmPassword) {
+                setSaveError('Please fill in all password fields before saving.');
+                setIsSaving(false);
+                return;
+            }
+
+            if (profileData.newPassword !== profileData.confirmPassword) {
+                setSaveError('New password and confirmation do not match.');
+                setIsSaving(false);
+                return;
+            }
+        }
         
         try {
             await updateClientProfile({
                 nom: profileData.businessName,
-                email: profileData.email,
+                name: profileData.businessName,
+                mail: profileData.email,
                 phone: profileData.phone,
                 business_type: profileData.businessType,
+                current_password: profileData.currentPassword,
+                new_password: profileData.newPassword,
+                confirm_password: profileData.confirmPassword,
             });
             setSaveSuccess('Profile updated successfully!');
             setTimeout(() => setSaveSuccess(''), 3000);

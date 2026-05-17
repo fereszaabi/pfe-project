@@ -68,11 +68,21 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [ticketOtpCode, setTicketOtpCode] = useState('');
     const [ticketOtpError, setTicketOtpError] = useState('');
     const [isOtpSending, setIsOtpSending] = useState(false);
-    const [pendingTicketData, setPendingTicketData] = useState(null);
+    const [clientId, setClientId] = useState(null);
 
     const priorityFees = { low: 10, medium: 20, high: 25, urgent: 30 };
 
     const getSelectedPriorityCost = (priority) => Number(priorityFees[priority] ?? 0);
+
+    const normalizeMessage = (value) => {
+        if (value == null) return '';
+        if (typeof value === 'string') return value;
+        if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+        if (typeof value === 'object') {
+            return value.message ?? value.error ?? value.details ?? value.detail ?? JSON.stringify(value);
+        }
+        return String(value);
+    };
 
     const hasInsufficientFundsForPriority = (priority) => {
         const fee = getSelectedPriorityCost(priority);
@@ -137,6 +147,12 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             if (!Number.isNaN(profileBalance)) {
                 setClientBalance(profileBalance);
             }
+
+            // Set client ID for realtime channels
+            const clientIdFromProfile = profileData?.profile?.id ?? profileData?.id;
+            if (clientIdFromProfile) {
+                setClientId(clientIdFromProfile);
+            }
         } catch (error) {
             // Handle errors if needed
         }
@@ -144,6 +160,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
     useEffect(() => {
         let channel = null;
+        let clientChannel = null;
 
         loadDashboardData();
         loadTickets();
@@ -153,6 +170,11 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 const echo = getEcho();
                 channel = echo.private(`user.user.${user.id}`);
 
+                // Also listen on client-specific channel if we have clientId
+                if (clientId) {
+                    clientChannel = echo.private(`user.client.${clientId}`);
+                }
+
                 channel.listen('.ticket.updated', (event) => {
                     const updatedTicket = event?.ticket;
                     console.log('Realtime ticket update:', updatedTicket);
@@ -160,7 +182,11 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
                     setTickets((prev) => {
                         const exists = prev.some((ticket) => ticket.id === updatedTicket.id);
-                        if (exists) {
+                        const existingTicket = prev.find((ticket) => ticket.id === updatedTicket.id);
+                        if (exists && existingTicket) {
+                            const notificationPayload = createTicketUpdateNotification(updatedTicket, existingTicket);
+                            showRealtimeNotification(notificationPayload);
+
                             return prev.map((ticket) =>
                                 ticket.id === updatedTicket.id ? { ...ticket, ...updatedTicket } : ticket
                             );
@@ -170,6 +196,57 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                         return prev;
                     });
                 });
+
+                // Listen for ticket messages on user channel
+                channel.listen('.ticket.message.created', (event) => {
+                    const message = event?.message;
+                    if (!message) return;
+
+                    // Only show notifications for messages from employees (technicians)
+                    const senderType = message.sender_type || message.senderType;
+                    if (senderType === 'employee') {
+                        showRealtimeNotification({
+                            title: 'New Message',
+                            message: `New message from technician: ${message.message?.slice(0, 50) || ''}...`,
+                        });
+                    }
+                });
+
+                // Set up listeners for client-specific channel if it exists
+                if (clientChannel) {
+                    clientChannel.listen('.ticket.updated', (event) => {
+                        const updatedTicket = event?.ticket;
+                        if (!updatedTicket?.id) return;
+
+                        setTickets((prev) => {
+                            const exists = prev.some((ticket) => ticket.id === updatedTicket.id);
+                            if (exists) {
+                                const existingTicket = prev.find((ticket) => ticket.id === updatedTicket.id);
+                                const notificationPayload = createTicketUpdateNotification(updatedTicket, existingTicket);
+                                showRealtimeNotification(notificationPayload);
+
+                                return prev.map((ticket) =>
+                                    ticket.id === updatedTicket.id ? { ...ticket, ...updatedTicket } : ticket
+                                );
+                            }
+                            return prev;
+                        });
+                    });
+
+                    clientChannel.listen('.ticket.message.created', (event) => {
+                        const message = event?.message;
+                        if (!message) return;
+
+                        // Only show notifications for messages from employees (technicians)
+                        const senderType = message.sender_type || message.senderType;
+                        if (senderType === 'employee') {
+                            showRealtimeNotification({
+                                title: 'New Message',
+                                message: `New message from technician: ${message.message?.slice(0, 50) || ''}...`,
+                            });
+                        }
+                    });
+                }
             }
         } catch (err) {
             // Realtime connection failed, but dashboard should still work
@@ -184,8 +261,15 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                     // ignore cleanup errors
                 }
             }
+            if (clientChannel) {
+                try {
+                    clientChannel.unsubscribe();
+                } catch (e) {
+                    // ignore cleanup errors
+                }
+            }
         };
-    }, [user?.id]);
+    }, [user?.id, clientId]);
 
     // Debounce search
     useEffect(() => {
@@ -211,7 +295,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             const notifs = logs.map(l => ({
                 id: l.id,
                 title: l.software_name || 'Update',
-                message: l.description,
+                message: normalizeMessage(l.description),
                 timestamp: new Date(l.created_at),
                 read: Boolean(l.is_read),
                 ticketId: l.demande_id,
@@ -341,7 +425,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
     const getHistoryTitle = (messages) => {
         const firstUser = messages.find((m) => m.role === 'user');
-        const raw = firstUser?.content || 'Support Chat';
+        const raw = normalizeMessage(firstUser?.content) || 'Support Chat';
         return raw.length > 48 ? `${raw.slice(0, 48)}...` : raw;
     };
 
@@ -351,7 +435,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
         const trimmedMessages = messages.slice(-50).map((msg) => ({
             role: msg.role,
-            content: msg.content,
+            content: normalizeMessage(msg.content),
         }));
 
         try {
@@ -399,6 +483,28 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
     const [notificationToast, setNotificationToast] = useState(null);
     const [activeNotificationId, setActiveNotificationId] = useState(null);
 
+    const showRealtimeNotification = ({ title, message, ticketId = null, type = 'log' }) => {
+        const newNotification = {
+            id: `realtime-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            title,
+            message,
+            ticketId,
+            type,
+            timestamp: new Date(),
+            read: false,
+        };
+
+        setNotifications((prev) => [newNotification, ...prev]);
+        setUnreadCount((prev) => prev + 1);
+        setActiveNotificationId(newNotification.id);
+
+        const toast = { id: newNotification.id, title, message };
+        setNotificationToast(toast);
+        setTimeout(() => {
+            setNotificationToast((current) => (current?.id === toast.id ? null : current));
+        }, 5000);
+    };
+
     useEffect(() => {
         if (!notifications || notifications.length === 0) return;
         const latest = notifications.find(n => n.type === 'balance_change' || n.type === 'log');
@@ -441,8 +547,61 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         setUnreadCount(0);
     };
 
+    const createTicketUpdateNotification = (updatedTicket, existingTicket) => {
+        const wasUnassigned = !existingTicket?.id_employee;
+        const nowAssigned = Boolean(updatedTicket.id_employee);
+        const statusChanged = updatedTicket.status && existingTicket?.status !== updatedTicket.status;
+
+        if (wasUnassigned && nowAssigned) {
+            return {
+                title: 'Ticket Claimed',
+                message: `Ticket #${updatedTicket.id} has been claimed by a technician.`,
+                ticketId: updatedTicket.id,
+            };
+        }
+
+        if (statusChanged) {
+            if (['resolved', 'closed'].includes(updatedTicket.status)) {
+                return {
+                    type: 'resolved',
+                    action: 'rate',
+                    title: updatedTicket.status === 'resolved' ? 'Ticket Resolved' : 'Ticket Closed',
+                    message: `Ticket #${updatedTicket.id} has been ${updatedTicket.status}. Click to review and rate the technician.`,
+                    ticketId: updatedTicket.id,
+                };
+            }
+
+            return {
+                type: 'status_change',
+                title: 'Ticket Updated',
+                message: `Ticket #${updatedTicket.id} status changed to ${updatedTicket.status}.`,
+                ticketId: updatedTicket.id,
+            };
+        }
+
+        return {
+            type: 'update',
+            title: 'Ticket Updated',
+            message: `Ticket #${updatedTicket.id} was updated.`,
+            ticketId: updatedTicket.id,
+        };
+    };
+
     const openNotification = (notif) => {
         selectNotification(notif);
+
+        if (notif.action === 'rate' && notif.ticketId) {
+            const ticketToRate = tickets.find((ticket) => ticket.id === notif.ticketId);
+            if (ticketToRate) {
+                setRatingTicket(ticketToRate);
+                setRatingValue(0);
+                setRatingComment('');
+                setRatingError('');
+                setShowNotifications(false);
+                return;
+            }
+        }
+
         if (notif.ticketId) {
             onViewTicket?.(notif.ticketId);
         }
@@ -606,7 +765,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         }
 
         // Store pending data and request OTP
-        setPendingTicketData({ ticketData, useNewMachine });
+        setPendingTicketSubmission({ ticketData, useNewMachine });
         setShowTicketOtpPrompt(true);
         setTicketOtpCode('');
         setIsOtpSending(true);
@@ -617,8 +776,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
         } catch (err) {
             const errorMsg = err?.message || 'Failed to send verification code. Please try again.';
             setTicketOtpError(errorMsg);
-            setPendingTicketData(null);
-            setShowTicketOtpPrompt(false);
+            setShowTicketOtpPrompt(true);
         } finally {
             setIsOtpSending(false);
         }
@@ -630,12 +788,12 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             return;
         }
 
-        if (!pendingTicketData) {
+        if (!pendingTicketSubmission) {
             setTicketOtpError('Ticket data lost. Please try again.');
             return;
         }
 
-        const { ticketData, useNewMachine } = pendingTicketData;
+        const { ticketData, useNewMachine } = pendingTicketSubmission;
         setIsSubmittingTicket(true);
         setShowTicketOtpPrompt(false);
         setTicketNotice({
@@ -658,7 +816,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             if (response?.insufficient_funds) {
                 setTicketNotice({
                     title: 'Insufficient funds',
-                    message: response?.warning || 'Your ticket was submitted. Please pay within 7 days. An admin has been notified.',
+                    message: normalizeMessage(response?.warning ?? 'Your ticket was submitted. Please pay within 7 days. An admin has been notified.'),
                     deadline: response?.payment_deadline || '7 days',
                 });
             }
@@ -682,9 +840,11 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
             setTicketNotice({
                 title: response?.insufficient_funds ? 'Ticket submitted' : 'Ticket submitted',
-                message: response?.insufficient_funds
-                    ? response?.warning || 'Your ticket was submitted. Please pay within 7 days. An admin has been notified.'
-                    : 'Your ticket has been submitted successfully.',
+                message: normalizeMessage(
+                    response?.insufficient_funds
+                        ? response?.warning ?? 'Your ticket was submitted. Please pay within 7 days. An admin has been notified.'
+                        : 'Your ticket has been submitted successfully.'
+                ),
                 deadline: response?.payment_deadline || null,
                 processing: false,
             });
@@ -694,7 +854,6 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
             setShowTicketOtpPrompt(true);
         } finally {
             setIsSubmittingTicket(false);
-            setPendingTicketData(null);
         }
     };
 
@@ -791,7 +950,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 botTimeoutIdRef.current = null;
             }
 
-            const botReply = response?.reply || 'I could not generate a response right now. Please try again.';
+            const botReply = normalizeMessage(response?.reply ?? 'I could not generate a response right now. Please try again.');
             const isTimeout = response?.meta?.timeout === true;
 
             setSupportMessages((prev) => [
@@ -810,17 +969,23 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                 botTimeoutIdRef.current = null;
             }
 
-            // Determine error message based on error type
-            let errorMessage = 'AI assistant is temporarily unavailable.';
+            // Determine error message based on error type.
+            // apiRequest throws plain objects (e.g. { error: "..." }) on non-2xx,
+            // so we check those before falling back to Error.message / generic text.
+            let errorMessage = 'AI assistant is temporarily unavailable. Please try again or create a support ticket.';
 
             if (err?.name === 'AbortError' || err?.message?.includes('AbortError')) {
                 errorMessage = 'Request timed out. Please try again or create a support ticket.';
-            } else if (err?.message?.includes('timeout') || err?.message?.includes('unable')) {
+            } else if (err?.reply) {
+                // Backend returned a fallback reply inside a non-ok response body
+                errorMessage = normalizeMessage(err.reply);
+            } else if (err?.error) {
+                // apiRequest wraps abort/timeout as { error: "..." }
+                errorMessage = normalizeMessage(err.error);
+            } else if (typeof err?.message === 'string' && (err.message.includes('timeout') || err.message.includes('unable'))) {
                 errorMessage = 'AI assistant took too long to respond. Please create a support ticket for faster help.';
             } else if (err?.message) {
-                errorMessage = err.message;
-            } else {
-                errorMessage = 'AI assistant encountered an error. Please create a support ticket.';
+                errorMessage = normalizeMessage(err.message);
             }
 
             setSupportMessages((prev) => [
@@ -954,13 +1119,13 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                                     <button
                                                         key={notif.id}
                                                         type="button"
-                                                        onClick={() => selectNotification(notif)}
+                                                        onClick={() => openNotification(notif)}
                                                         className={`w-full text-left p-4 border-b border-slate-200 dark:border-slate-800 transition-colors ${activeNotificationId === notif.id ? 'bg-white dark:bg-slate-900' : 'hover:bg-slate-100 dark:hover:bg-slate-900/80'} ${!notif.read ? 'bg-blue-50 dark:bg-blue-900/10' : ''}`}
                                                     >
                                                         <div className="flex items-center justify-between gap-3">
                                                             <div>
-                                                                <p className="font-semibold text-sm text-slate-900 dark:text-white">{notif.title}</p>
-                                                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">{notif.message}</p>
+                                                                <p className="font-semibold text-sm text-slate-900 dark:text-white">{normalizeMessage(notif.title)}</p>
+                                                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">{normalizeMessage(notif.message)}</p>
                                                             </div>
                                                             {!notif.read && (
                                                                 <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold">New</span>
@@ -989,11 +1154,11 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                                             )}
                                                         </div>
                                                         <div className="min-w-0">
-                                                            <p className="font-bold text-slate-900 dark:text-white text-lg">{activeNotification.title}</p>
+                                                            <p className="font-bold text-slate-900 dark:text-white text-lg">{normalizeMessage(activeNotification.title)}</p>
                                                             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{activeNotification.timestamp.toLocaleString()}</p>
                                                         </div>
                                                     </div>
-                                                    <div className="mt-4 text-sm leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{activeNotification.message}</div>
+                                                    <div className="mt-4 text-sm leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{normalizeMessage(activeNotification.message)}</div>
                                                     {activeNotification.ticketId && (
                                                         <div className="mt-5 flex items-center gap-2">
                                                             <span className="inline-flex items-center justify-center rounded-full bg-slate-100 dark:bg-slate-900 px-3 py-1 text-xs text-slate-600 dark:text-slate-300">Ticket #{activeNotification.ticketId}</span>
@@ -1133,7 +1298,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                             <form onSubmit={handleSubmit} className="p-6 space-y-4">
                                 {submitError && (
                                     <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-600 dark:text-red-400">
-                                        {submitError}
+                                        {normalizeMessage(submitError)}
                                     </div>
                                 )}
                                 <div>
@@ -1323,7 +1488,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                         className="w-full rounded-lg border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-center text-2xl font-mono tracking-widest focus:border-primary focus:ring-primary h-14 transition-colors"
                                     />
                                     {ticketOtpError && (
-                                        <p className="text-sm text-red-600 dark:text-red-400">{ticketOtpError}</p>
+                                        <p className="text-sm text-red-600 dark:text-red-400">{normalizeMessage(ticketOtpError)}</p>
                                     )}
                                 </div>
 
@@ -1334,7 +1499,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                             setShowTicketOtpPrompt(false);
                                             setTicketOtpCode('');
                                             setTicketOtpError('');
-                                            setPendingTicketData(null);
+                                            setPendingTicketSubmission(null);
                                         }}
                                         disabled={isSubmittingTicket}
                                         className="flex-1 px-4 py-2.5 border border-slate-300 dark:border-slate-700 rounded-lg font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1505,7 +1670,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                     <span className="material-symbols-outlined text-amber-600 dark:text-amber-300">warning</span>
                                 </div>
                                 <div>
-                                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">{ticketNotice.title}</h3>
+                                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">{normalizeMessage(ticketNotice.title)}</h3>
                                     <p className="text-xs text-slate-500">Support ticket alert</p>
                                 </div>
                             </div>
@@ -1514,10 +1679,10 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                             </button>
                         </div>
                         <div className="p-6 space-y-4">
-                            <p className="text-sm text-slate-700 dark:text-slate-300">{ticketNotice.message}</p>
+                            <p className="text-sm text-slate-700 dark:text-slate-300">{normalizeMessage(ticketNotice.message)}</p>
                             <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-200">
                                 <p className="font-semibold">Payment deadline</p>
-                                <p>You need to settle this within {ticketNotice.deadline}.</p>
+                                <p>You need to settle this within {normalizeMessage(ticketNotice.deadline)}.</p>
                             </div>
                             <div className="flex justify-end">
                                 <button
@@ -1546,7 +1711,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                         <div className="p-6 space-y-6">
                             {ratingError && (
                                 <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-600 dark:text-red-400">
-                                    {ratingError}
+                                    {normalizeMessage(ratingError)}
                                 </div>
                             )}
 
@@ -1657,7 +1822,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                     {supportMessages.map((msg) => (
                                         <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                             <div className={`max-w-[80%] px-4 py-2 rounded-xl text-sm ${msg.role === 'user' ? 'bg-primary text-white rounded-br-sm' : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-bl-sm border border-slate-200 dark:border-slate-700'}`}>
-                                                {msg.content}
+                                                {normalizeMessage(msg.content)}
                                             </div>
                                         </div>
                                     ))}
@@ -1709,7 +1874,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                                 onClick={() => setActiveHistoryId(entry.id)}
                                                 className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${activeHistoryId === entry.id ? 'border-primary bg-primary/10 text-slate-900 dark:text-white' : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/60'}`}
                                             >
-                                                <p className="font-semibold line-clamp-2">{entry.title}</p>
+                                                <p className="font-semibold line-clamp-2">{normalizeMessage(entry.title)}</p>
                                                 <p className="text-[10px] text-slate-400 mt-1">{new Date(entry.createdAt).toLocaleString()}</p>
                                             </button>
                                         ))
@@ -1722,7 +1887,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                         (supportHistory.find((entry) => entry.id === activeHistoryId) || supportHistory[0])?.messages?.map((msg, idx) => (
                                             <div key={`${activeHistoryId}-${idx}`} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} mb-2`}>
                                                 <div className={`max-w-[80%] px-3 py-2 rounded-xl text-sm ${msg.role === 'user' ? 'bg-primary text-white rounded-br-sm' : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-bl-sm border border-slate-200 dark:border-slate-700'}`}>
-                                                    {msg.content}
+                                                    {normalizeMessage(msg.content)}
                                                 </div>
                                             </div>
                                         ))
@@ -1755,7 +1920,7 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
 
                                 {helpError && (
                                     <div className="p-3 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 text-sm">
-                                        {helpError}
+                                        {normalizeMessage(helpError)}
                                     </div>
                                 )}
 
@@ -1775,12 +1940,12 @@ export function ClientDashboard({ user, onViewTicket, onLogout, onNavigate, acti
                                             <article key={article.id} className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-4 hover:border-primary/40 transition-colors">
                                                 <div className="flex items-start justify-between gap-3">
                                                     <div>
-                                                        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">{article.category}</p>
+                                                        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">{normalizeMessage(article.category)}</p>
                                                         <h4 className="font-bold text-slate-900 dark:text-white mt-1">{article.title}</h4>
                                                     </div>
                                                     <span className="material-symbols-outlined text-primary text-lg">menu_book</span>
                                                 </div>
-                                                <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 line-clamp-3">{article.summary}</p>
+                                                <p className="text-sm text-slate-600 dark:text-slate-300 mt-2 line-clamp-3">{normalizeMessage(article.summary)}</p>
                                                 {Array.isArray(article.keywords) && article.keywords.length > 0 && (
                                                     <div className="flex flex-wrap gap-2 mt-3">
                                                         {article.keywords.slice(0, 3).map((keyword) => (
