@@ -9,6 +9,7 @@ use App\Models\User;
 use Carbon\Carbon;
 use App\Events\TicketUpdated;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 class EmployeeController extends Controller
 {
@@ -354,7 +355,7 @@ class EmployeeController extends Controller
 
         // Load relationships and broadcast update
         $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
-        broadcast(new TicketUpdated($updatedTicket))->toOthers();
+        $this->safeBroadcast(new TicketUpdated($updatedTicket));
 
         return response()->json([
             'message' => 'Ticket claimed successfully',
@@ -407,7 +408,7 @@ class EmployeeController extends Controller
 
         // Load relationships and broadcast update
         $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
-        broadcast(new TicketUpdated($updatedTicket))->toOthers();
+        $this->safeBroadcast(new TicketUpdated($updatedTicket));
 
         return response()->json($updatedTicket);
     }
@@ -477,9 +478,21 @@ class EmployeeController extends Controller
         }
 
         $updatedTicket = $demande->fresh()->load(['client', 'employee', 'machine']);
-        broadcast(new TicketUpdated($updatedTicket))->toOthers();
+        $this->safeBroadcast(new TicketUpdated($updatedTicket));
 
         return response()->json($updatedTicket);
+    }
+
+    /**
+     * Safely broadcast an event without letting broadcast failures break the request.
+     */
+    private function safeBroadcast($event)
+    {
+        try {
+            broadcast($event)->toOthers();
+        } catch (\Exception $e) {
+            Log::warning('Broadcast failed: ' . $e->getMessage(), ['exception' => $e]);
+        }
     }
 
     /**

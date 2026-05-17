@@ -327,6 +327,12 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
         }
     };
 
+    const formatOtpTypeLabel = (type) => {
+        if (type === 'client') return 'client';
+        if (type === 'emp' || type === 'employee') return 'emp';
+        return type || 'otp';
+    };
+
     // Calculate statistics
     const totalTickets = tickets.length;
     const resolvedTickets = tickets.filter(t => t.status === 'resolved').length;
@@ -1303,12 +1309,17 @@ export function AdminDashboard({ user, onLogout, onNavigate, activeView }) {
                                         <div key={`${entry.created_at || index}-${index}`} className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-midnight p-4 flex items-start justify-between gap-4">
                                             <div>
                                                 <div className="flex items-center gap-2 flex-wrap">
-                                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${entry.type === 'ticket' ? 'bg-blue-500/10 text-blue-600' : 'bg-primary/10 text-primary'}`}>
-                                                        {entry.type || 'otp'}
+                                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${entry.type === 'ticket' ? 'bg-blue-500/10 text-blue-600' : entry.type === 'client' ? 'bg-emerald-500/10 text-emerald-600' : 'bg-primary/10 text-primary'}`}>
+                                                        {formatOtpTypeLabel(entry.type)}
                                                     </span>
+                                                    {entry.client_name && (
+                                                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-slate-200/80 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                                                            client
+                                                        </span>
+                                                    )}
                                                     <span className="text-xs text-slate-400">{entry.created_at ? new Date(entry.created_at).toLocaleString() : 'Unknown time'}</span>
                                                 </div>
-                                                <p className="text-sm font-semibold text-slate-900 dark:text-white mt-2">{entry.recipient || 'Unknown recipient'}</p>
+                                                <p className="text-sm font-semibold text-slate-900 dark:text-white mt-2">{entry.recipient || entry.client_name || 'Unknown recipient'}</p>
                                                 <p className="text-xs text-slate-500 mt-1">Expires: {entry.expires_at ? new Date(entry.expires_at).toLocaleString() : '—'}</p>
                                             </div>
                                             <div className="text-right">
